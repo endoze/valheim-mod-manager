@@ -3,3 +3,4 @@
 .last_modified
 downloads/*
 vmm_config.toml
+/coverage

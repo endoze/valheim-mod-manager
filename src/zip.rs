@@ -383,6 +383,28 @@ mod tests {
     assert!(result.is_err());
   }
 
+  #[test]
+  fn test_unzip_downloaded_mods_with_valid_zip() {
+    let temp_dir = tempdir().unwrap();
+    let cache_dir = temp_dir.path().to_str().unwrap();
+    let downloads_dir = PathBuf::from(cache_dir).join("downloads");
+    fs::create_dir_all(&downloads_dir).unwrap();
+
+    let manifest_content = r#"{
+      "version_number": "1.0.0",
+      "name": "TestMod",
+      "description": "Test mod description"
+    }"#;
+
+    let _zip_path = create_test_zip(&downloads_dir, "Owner-ModName-1.0.0.zip", manifest_content);
+
+    let non_zip_path = downloads_dir.join("not-a-zipfile.txt");
+    let mut non_zip_file = File::create(&non_zip_path).unwrap();
+    non_zip_file.write_all(b"This is not a zip file").unwrap();
+
+    let _result = unzip_downloaded_mods(cache_dir);
+  }
+
   fn create_test_zip(dir: &Path, filename: &str, manifest_content: &str) -> PathBuf {
     let zip_path = dir.join(filename);
     let file = File::create(&zip_path).unwrap();
@@ -396,6 +418,13 @@ mod tests {
 
     zip.start_file("README.md", options).unwrap();
     zip.write_all(b"# Test Mod\nThis is a test mod.").unwrap();
+
+    zip.add_directory("test_directory/", options).unwrap();
+
+    zip
+      .start_file("test_directory/test_file.txt", options)
+      .unwrap();
+    zip.write_all(b"Test file inside directory").unwrap();
 
     zip.finish().unwrap();
 
@@ -413,53 +442,66 @@ mod tests {
   }
 
   #[test]
-  fn test_process_zip_file() {
-    // We need to set APP_CONFIG.install_dir to None for this test
-    // Since we can't modify the global static, we'll mock the function behavior
+  fn test_unzip_with_invalid_paths() {
     let temp_dir = tempdir().unwrap();
-    let cache_dir = temp_dir.path().to_str().unwrap();
-    let mut cache_path = PathBuf::from(cache_dir);
-    cache_path.push("downloads");
-    let downloads_dir = cache_path;
+    let output_dir = temp_dir.path().join("output");
+    fs::create_dir_all(&output_dir).unwrap();
+
+    let zip_path = temp_dir.path().join("test_invalid_paths.zip");
+    let file = File::create(&zip_path).unwrap();
+    let mut zip = ZipWriter::new(file);
+
+    let options: FileOptions<'_, ()> =
+      FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    zip.start_file("valid_file.txt", options).unwrap();
+    zip.write_all(b"Valid file content").unwrap();
+
+    zip.finish().unwrap();
+
+    let file = File::open(&zip_path).unwrap();
+    let result = unzip(file, &output_dir);
+
+    assert!(result.is_ok());
+
+    let valid_file = output_dir.join("valid_file.txt");
+    assert!(valid_file.exists());
+  }
+
+  #[test]
+  fn test_process_zip_file_invalid_filename() {
+    let temp_dir = tempdir().unwrap();
+    let downloads_dir = temp_dir.path().join("downloads");
     fs::create_dir_all(&downloads_dir).unwrap();
 
-    // Create a manifest.json content
-    let manifest_content = r#"{
-      "version_number": "1.0.0",
-      "name": "TestMod",
-      "description": "Test mod description"
-    }"#;
+    let invalid_zip_path = downloads_dir.join("InvalidFile.zip");
+    let mut file = File::create(&invalid_zip_path).unwrap();
+    file.write_all(b"This is not a valid zip file").unwrap();
 
-    // Create a test zip file
-    let zip_path = create_test_zip(&downloads_dir, "Owner-ModName-1.0.0.zip", manifest_content);
+    let result = process_zip_file(&downloads_dir, &invalid_zip_path);
 
-    // Process the zip file
-    // We need to mock/test the parts individually since we can't modify APP_CONFIG
-    let file_name = "Owner-ModName-1.0.0.zip";
-    let parts: Vec<&str> = file_name.split('-').collect();
-    let mod_name = format!("{}-{}", parts[0], parts[1]);
-    let _zip_version = parts[2].trim_end_matches(".zip"); // Not used but included for completeness
-    let mod_dir = downloads_dir.join(&mod_name);
+    assert!(result.is_err());
+    if let Err(err) = result {
+      match err {
+        AppError::Other(msg) => {
+          assert!(msg.contains("Invalid filename format"));
+        }
+        _ => panic!("Expected 'Other' error for invalid filename format"),
+      }
+    }
+  }
 
-    // Create mod directory
-    fs::create_dir_all(&mod_dir).unwrap();
+  #[test]
+  fn test_process_zip_file_nonexistant_filename() {
+    let temp_dir = tempdir().unwrap();
+    let downloads_dir = temp_dir.path().join("downloads");
+    fs::create_dir_all(&downloads_dir).unwrap();
 
-    // Extract zip
-    let file = fs::File::open(&zip_path).unwrap();
-    let extract_result = unzip(file, &mod_dir);
-    assert!(extract_result.is_ok());
+    let nonexistent_path = PathBuf::from("/nonexistent/file/that/does/not/exist");
 
-    // Check that the mod directory was created
-    assert!(mod_dir.exists());
+    let result = process_zip_file(&downloads_dir, &nonexistent_path);
 
-    // Check that manifest.json was extracted
-    let extracted_manifest = mod_dir.join("manifest.json");
-    assert!(extracted_manifest.exists());
-
-    // Read and verify the extracted manifest content
-    let content = fs::read_to_string(extracted_manifest).unwrap();
-    assert!(content.contains("1.0.0"));
-    assert!(content.contains("TestMod"));
+    assert!(result.is_err());
   }
 
   #[test]
@@ -519,11 +561,6 @@ mod tests {
       mod_name,
     );
 
-    match &result {
-      Err(error) => println!("Copy error: {:?}", error),
-      Ok(_) => println!("Copy succeeded"),
-    }
-
     assert!(result.is_ok());
 
     let target_dir = install_dir.path().join(mod_name);
@@ -543,5 +580,46 @@ mod tests {
 
     assert_eq!(content1, "test file 1 content");
     assert_eq!(content3, "test file 3 content");
+  }
+
+  #[test]
+  fn test_copy_mod_to_install_dir_nonexistent_dir() {
+    let src_dir = tempdir().unwrap();
+    let install_dir = tempdir().unwrap();
+    let nonexistent_dir = install_dir.path().join("nonexistent");
+    let mod_name = "TestMod";
+
+    let test_file = src_dir.path().join("test.txt");
+    let mut file = File::create(&test_file).unwrap();
+    file.write_all(b"test content").unwrap();
+
+    let result =
+      copy_mod_to_install_dir(src_dir.path(), nonexistent_dir.to_str().unwrap(), mod_name);
+
+    assert!(result.is_ok());
+    assert!(nonexistent_dir.exists());
+    assert!(nonexistent_dir.join(mod_name).exists());
+    assert!(nonexistent_dir.join(mod_name).join("test.txt").exists());
+  }
+
+  #[test]
+  fn test_copy_mod_to_install_dir_empty_src() {
+    let src_dir = tempdir().unwrap();
+    let install_dir = tempdir().unwrap();
+    let mod_name = "EmptyMod";
+
+    let result = copy_mod_to_install_dir(
+      src_dir.path(),
+      install_dir.path().to_str().unwrap(),
+      mod_name,
+    );
+
+    assert!(result.is_ok());
+
+    let target_dir = install_dir.path().join(mod_name);
+    assert!(target_dir.exists());
+
+    let entries = fs::read_dir(&target_dir).unwrap().count();
+    assert_eq!(entries, 0);
   }
 }

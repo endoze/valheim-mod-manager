@@ -25,6 +25,7 @@ impl Default for AppConfig {
   }
 }
 
+#[cfg(not(tarpaulin_include))]
 pub static APP_CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
   get_config().unwrap_or_else(|err| panic!("An error has occurred getting the config: '{err}'"))
 });
@@ -33,6 +34,7 @@ pub static APP_CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
 ///
 /// If a config.toml didn't already exist
 /// a new one is created and set with default values.
+#[cfg(not(tarpaulin_include))]
 fn get_config() -> Result<AppConfig, ConfigError> {
   let default_config_data = AppConfig::default();
   let config_path_name = "vmm_config.toml";
