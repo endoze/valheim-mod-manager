@@ -396,4 +396,38 @@ mod tests {
     let result4 = dg4.resolve(&manifest);
     assert_eq!(result4.len(), 0);
   }
+
+  #[test]
+  fn test_package_debug() {
+    let pkg = create_test_package("ModTest", "OwnerTest", "1.2.3");
+    let debug_output = format!("{:?}", pkg);
+
+    assert!(debug_output.contains("Package"));
+    assert!(debug_output.contains("full_name: Some(\"OwnerTest-ModTest\")"));
+    assert!(debug_output.contains("dependencies: Some([])"));
+    assert!(
+      debug_output.contains("download_url: Some(Some(\"https://example.com/ModTest/download\"))")
+    );
+
+    let mut pkg_with_deps = create_test_package_with_dependencies(
+      "ModWithDeps",
+      "OwnerTest",
+      "2.0.0",
+      vec!["Dep1-Mod1".to_string(), "Dep2-Mod2".to_string()],
+    );
+    let debug_with_deps = format!("{:?}", pkg_with_deps);
+
+    assert!(debug_with_deps.contains("dependencies: Some([\"Dep1-Mod1\", \"Dep2-Mod2\"])"));
+
+    pkg_with_deps.full_name = None;
+    let debug_missing_name = format!("{:?}", pkg_with_deps);
+    assert!(debug_missing_name.contains("full_name: None"));
+
+    let mut pkg_no_version = create_test_package("NoVersion", "TestOwner", "1.0.0");
+    pkg_no_version.versions.clear();
+    let debug_no_version = format!("{:?}", pkg_no_version);
+
+    assert!(debug_no_version.contains("dependencies: None"));
+    assert!(debug_no_version.contains("download_url: None"));
+  }
 }

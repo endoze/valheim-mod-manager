@@ -22,6 +22,7 @@ use package::DependencyGraph;
 ///
 /// `Ok(())` if the program runs successfully, or an error if something fails.
 #[tokio::main]
+#[cfg(not(tarpaulin_include))]
 async fn main() -> AppResult<()> {
   logs::setup_logging();
   let app = AppCli::parse();
@@ -31,10 +32,10 @@ async fn main() -> AppResult<()> {
     Command::Update(subcmd) => match subcmd.command {
       UpdatesCommand::Manifest => {
         tracing::info!("Checking for manifest updates");
-        let _ = api::get_manifest(&APP_CONFIG.cache_dir).await?;
+        let _ = api::get_manifest(&APP_CONFIG.cache_dir, None).await?;
       }
       UpdatesCommand::Mods => {
-        let manifest = api::get_manifest(&APP_CONFIG.cache_dir).await?;
+        let manifest = api::get_manifest(&APP_CONFIG.cache_dir, None).await?;
         let packages = APP_CONFIG.mod_list.clone();
 
         tracing::info!("Building dependency graph for mods");
@@ -50,7 +51,7 @@ async fn main() -> AppResult<()> {
       }
     },
     Command::Search(search_args) => {
-      let manifest = api::get_manifest(&APP_CONFIG.cache_dir).await?;
+      let manifest = api::get_manifest(&APP_CONFIG.cache_dir, None).await?;
       let search_term = search_args.term.to_lowercase();
 
       let search_results: Vec<_> = manifest

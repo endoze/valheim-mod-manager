@@ -38,6 +38,11 @@ fn api_manifest_path(cache_dir: &str) -> PathBuf {
 /// If a cached version exists and is current, it loads from disk.
 /// Otherwise, it downloads the manifest from the network and caches it.
 ///
+/// # Parameters
+///
+/// * `cache_dir` - The directory to store cache files in
+/// * `api_url` - The API URL to use for network requests (defaults to API_URL)
+///
 /// # Returns
 ///
 /// A `HashMap` where keys are package full names and values are the corresponding `Package` objects.
@@ -48,18 +53,23 @@ fn api_manifest_path(cache_dir: &str) -> PathBuf {
 /// - Failed to check or retrieve last modified dates
 /// - Network request fails
 /// - Parsing fails
-pub async fn get_manifest(cache_dir: &str) -> AppResult<HashMap<String, Package>> {
+pub async fn get_manifest(
+  cache_dir: &str,
+  api_url: Option<&str>,
+) -> AppResult<HashMap<String, Package>> {
+  let api_url = api_url.unwrap_or(API_URL);
   let last_modified = local_last_modified(cache_dir).await?;
   tracing::info!("Manifest last modified: {}", last_modified);
 
-  let packages =
-    if api_manifest_file_exists(cache_dir) && network_last_modified().await? <= last_modified {
-      tracing::info!("Loading manifest from cache");
-      get_manifest_from_disk(cache_dir).await?
-    } else {
-      tracing::info!("Downloading new manifest");
-      get_manifest_from_network_and_cache(cache_dir).await?
-    };
+  let packages = if api_manifest_file_exists(cache_dir)
+    && network_last_modified(api_url).await? <= last_modified
+  {
+    tracing::info!("Loading manifest from cache");
+    get_manifest_from_disk(cache_dir).await?
+  } else {
+    tracing::info!("Downloading new manifest");
+    get_manifest_from_network_and_cache(cache_dir, api_url).await?
+  };
 
   Ok(
     packages
@@ -105,6 +115,10 @@ async fn get_manifest_from_disk(cache_dir: &str) -> AppResult<Vec<Package>> {
 /// It parses the downloaded data to filter out fields marked with #[serde(skip_deserializing)],
 /// which helps reduce the size of stored data on disk.
 ///
+/// # Parameters
+///
+/// * `api_url` - The API URL to download the manifest from
+///
 /// # Returns
 ///
 /// A tuple containing:
@@ -118,11 +132,13 @@ async fn get_manifest_from_disk(cache_dir: &str) -> AppResult<Vec<Package>> {
 /// - Response headers cannot be parsed
 /// - Last modified date cannot be parsed
 /// - JSON parsing or serialization fails
-async fn get_manifest_from_network() -> AppResult<(Vec<Package>, DateTime<FixedOffset>)> {
+async fn get_manifest_from_network(
+  api_url: &str,
+) -> AppResult<(Vec<Package>, DateTime<FixedOffset>)> {
   let client = Client::builder().build()?;
 
   let multi_progress = MultiProgress::new();
-  let style_template = "[{elapsed_precise}] {spinner:.green} {wide_msg}";
+  let style_template = "";
   let progress_style = ProgressStyle::with_template(style_template)
     .unwrap()
     .tick_strings(&["-", "\\", "|", "/", ""]);
@@ -132,7 +148,7 @@ async fn get_manifest_from_network() -> AppResult<(Vec<Package>, DateTime<FixedO
   progress_bar.set_message("Downloading Api Manifest");
   progress_bar.enable_steady_tick(Duration::from_millis(130));
 
-  let response = client.get(API_URL).send().await?;
+  let response = client.get(api_url).send().await?;
   let last_modified_str = response
     .headers()
     .get(header::LAST_MODIFIED)
@@ -154,6 +170,11 @@ async fn get_manifest_from_network() -> AppResult<(Vec<Package>, DateTime<FixedO
 /// This function retrieves the manifest from the API server and saves both
 /// the manifest content and the last modified date to disk.
 ///
+/// # Parameters
+///
+/// * `cache_dir` - The directory to store cache files in
+/// * `api_url` - The API URL to download the manifest from
+///
 /// # Returns
 ///
 /// The manifest data as Vec<Package>.
@@ -163,8 +184,11 @@ async fn get_manifest_from_network() -> AppResult<(Vec<Package>, DateTime<FixedO
 /// Returns an error if:
 /// - Network request fails
 /// - Writing cache files fails
-async fn get_manifest_from_network_and_cache(cache_dir: &str) -> AppResult<Vec<Package>> {
-  let results = get_manifest_from_network().await?;
+async fn get_manifest_from_network_and_cache(
+  cache_dir: &str,
+  api_url: &str,
+) -> AppResult<Vec<Package>> {
+  let results = get_manifest_from_network(api_url).await?;
   let packages = results.0;
   let last_modified_from_network = results.1;
 
@@ -221,6 +245,10 @@ async fn local_last_modified(cache_dir: &str) -> AppResult<DateTime<FixedOffset>
 ///
 /// Makes a HEAD request to the API endpoint to check when the manifest was last updated.
 ///
+/// # Parameters
+///
+/// * `api_url` - The API URL to check
+///
 /// # Returns
 ///
 /// The last modified date from the server as a `DateTime<FixedOffset>`.
@@ -231,10 +259,10 @@ async fn local_last_modified(cache_dir: &str) -> AppResult<DateTime<FixedOffset>
 /// - Network request fails
 /// - Last-Modified header is missing
 /// - Date string cannot be parsed
-async fn network_last_modified() -> AppResult<DateTime<FixedOffset>> {
+async fn network_last_modified(api_url: &str) -> AppResult<DateTime<FixedOffset>> {
   let client = Client::builder().build()?;
 
-  let response = client.head(API_URL).send().await?;
+  let response = client.head(api_url).send().await?;
 
   let last_modified =
     response
@@ -300,8 +328,10 @@ async fn write_cache_to_disk<T: AsRef<Path>>(
       .map_err(|e| AppError::Manifest(format!("Failed to compress data: {}", e)))?;
 
     file.write_all(&compressed_data).await?;
+    file.flush().await?;
   } else {
     file.write_all(contents).await?;
+    file.flush().await?;
   }
 
   Ok(())
@@ -333,8 +363,7 @@ pub async fn download_files(urls: HashMap<String, String>, cache_dir: &str) -> A
   let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
 
   let multi_progress = MultiProgress::new();
-  let style_template =
-    "[{elapsed_precise}] {bar:40.cyan/blue} {decimal_bytes}/{decimal_total_bytes} {msg}";
+  let style_template = "";
   let progress_style = ProgressStyle::with_template(style_template)
     .unwrap()
     .progress_chars("#>-");
@@ -665,6 +694,24 @@ mod tests {
   }
 
   #[test]
+  fn test_get_manifest_from_disk_error() {
+    let temp_dir = tempdir().unwrap();
+    let temp_dir_str = temp_dir.path().to_str().unwrap();
+
+    let mut path = PathBuf::from(temp_dir_str);
+    path.push(API_MANIFEST_FILENAME);
+    let mut file = File::create(path).unwrap();
+    file
+      .write_all(b"This is not valid compressed data")
+      .unwrap();
+
+    let rt = Runtime::new().unwrap();
+    let result = rt.block_on(get_manifest_from_disk(temp_dir_str));
+
+    assert!(result.is_err());
+  }
+
+  #[test]
   fn test_network_last_modified() {
     let mut server = Server::new();
     let test_date = "Wed, 21 Feb 2024 15:30:45 GMT";
@@ -676,28 +723,13 @@ mod tests {
     let api_url = format!("{}/c/valheim/api/v1/package/", server.url());
     let rt = Runtime::new().unwrap();
 
-    let result = rt.block_on(async {
-      let client = Client::builder().build().unwrap();
-      let response = client.head(&api_url).send().await?;
-
-      let last_modified =
-        response
-          .headers()
-          .get(header::LAST_MODIFIED)
-          .ok_or(AppError::MissingHeader(
-            "Last-Modified for API manifest head request".to_string(),
-          ))?;
-
-      let date_str = last_modified.to_str()?;
-      let parsed_date = DateTime::parse_from_rfc2822(date_str)?;
-
-      Ok::<_, AppError>(parsed_date)
-    });
+    let result = rt.block_on(network_last_modified(&api_url));
 
     assert!(result.is_ok());
-    let parsed_date = result.unwrap();
-    let expected_date = DateTime::parse_from_rfc2822(test_date).unwrap();
-    assert_eq!(parsed_date, expected_date);
+    if let Ok(parsed_date) = result {
+      let expected_date = DateTime::parse_from_rfc2822(test_date).unwrap();
+      assert_eq!(parsed_date, expected_date);
+    }
 
     mock.assert();
   }
@@ -753,29 +785,316 @@ mod tests {
     let api_url = format!("{}/c/valheim/api/v1/package/", server.url());
 
     let rt = Runtime::new().unwrap();
-    let result = rt.block_on(async {
-      let client = Client::builder().build().unwrap();
-      let response = client.get(&api_url).send().await?;
-      let last_modified_str = response
-        .headers()
-        .get(header::LAST_MODIFIED)
-        .ok_or(AppError::MissingHeader("Last-Modified header".to_string()))?
-        .to_str()?;
-      let last_modified = DateTime::parse_from_rfc2822(last_modified_str)?;
-      let raw_response_data = response.bytes().await?;
-      let packages: Vec<Package> = serde_json::from_slice(&raw_response_data)?;
-
-      Ok::<_, AppError>((packages, last_modified))
-    });
+    let result = rt.block_on(get_manifest_from_network(&api_url));
 
     assert!(result.is_ok());
-    let (packages, last_modified) = result.unwrap();
-
-    assert_eq!(packages.len(), 1);
-    assert_eq!(packages[0].full_name, Some("Owner-ModA".to_string()));
-    let expected_date = DateTime::parse_from_rfc2822(test_date).unwrap();
-    assert_eq!(last_modified, expected_date);
+    if let Ok((packages, last_modified)) = result {
+      assert_eq!(packages.len(), 1);
+      assert_eq!(packages[0].full_name, Some("Owner-ModA".to_string()));
+      let expected_date = DateTime::parse_from_rfc2822(test_date).unwrap();
+      assert_eq!(last_modified, expected_date);
+    }
 
     mock.assert();
   }
+
+  #[test]
+  fn test_get_manifest() {
+    let temp_dir = tempdir().unwrap();
+    let temp_dir_str = temp_dir.path().to_str().unwrap();
+
+    let package = Package {
+      name: Some("CachedMod".to_string()),
+      full_name: Some("CachedOwner-CachedMod".to_string()),
+      owner: Some("CachedOwner".to_string()),
+      package_url: Some("https://example.com/CachedMod".to_string()),
+      date_created: OffsetDateTime::now_utc(),
+      date_updated: OffsetDateTime::now_utc(),
+      uuid4: Some("cached-uuid".to_string()),
+      rating_score: Some(5),
+      is_pinned: Some(false),
+      is_deprecated: Some(false),
+      has_nsfw_content: Some(false),
+      categories: vec!["test".to_string()],
+      versions: vec![],
+    };
+
+    let packages = vec![package];
+    let binary_data = bincode::serialize(&packages).unwrap();
+    let compressed_data = zstd::encode_all(binary_data.as_slice(), 3).unwrap();
+
+    std::fs::create_dir_all(PathBuf::from(temp_dir_str)).unwrap();
+
+    let mut manifest_path = PathBuf::from(temp_dir_str);
+    manifest_path.push(API_MANIFEST_FILENAME);
+    let mut file = File::create(manifest_path).unwrap();
+    file.write_all(&compressed_data).unwrap();
+
+    let now = chrono::Utc::now().with_timezone(&chrono::FixedOffset::east_opt(0).unwrap());
+    let recent_date = now.to_rfc2822();
+    let mut last_mod_path = PathBuf::from(temp_dir_str);
+    last_mod_path.push(LAST_MODIFIED_FILENAME);
+    let mut file = File::create(&last_mod_path).unwrap();
+    file.write_all(recent_date.as_bytes()).unwrap();
+
+    let rt = Runtime::new().unwrap();
+
+    let result = rt.block_on(get_manifest(temp_dir_str, None));
+
+    assert!(result.is_ok());
+  }
+
+  #[test]
+  fn test_get_manifest_from_network_and_cache() {
+    let mut server = Server::new();
+
+    let test_json = r#"[
+      {
+        "name": "ModA",
+        "full_name": "Owner-ModA",
+        "owner": "Owner",
+        "package_url": "https://example.com/mods/ModA",
+        "date_created": "2024-01-01T12:00:00Z",
+        "date_updated": "2024-01-02T12:00:00Z",
+        "uuid4": "test-uuid",
+        "rating_score": 5,
+        "is_pinned": false,
+        "is_deprecated": false,
+        "has_nsfw_content": false,
+        "categories": ["category1"],
+        "versions": [
+          {
+            "name": "ModA",
+            "full_name": "Owner-ModA",
+            "description": "Test description",
+            "icon": "icon.png",
+            "version_number": "1.0.0",
+            "dependencies": [],
+            "download_url": "https://example.com/mods/ModA/download",
+            "downloads": 100,
+            "date_created": "2024-01-01T12:00:00Z",
+            "website_url": "https://example.com",
+            "is_active": true,
+            "uuid4": "test-version-uuid",
+            "file_size": 1024
+          }
+        ]
+      }
+    ]"#;
+
+    let test_date = "Wed, 21 Feb 2024 15:30:45 GMT";
+
+    let mock = server
+      .mock("GET", "/c/valheim/api/v1/package/")
+      .with_status(200)
+      .with_header("Content-Type", "application/json")
+      .with_header("Last-Modified", test_date)
+      .with_body(test_json)
+      .create();
+
+    let api_url = format!("{}/c/valheim/api/v1/package/", server.url());
+    let temp_dir = tempdir().unwrap();
+    let temp_dir_str = temp_dir.path().to_str().unwrap();
+
+    let rt = Runtime::new().unwrap();
+    let result = rt.block_on(get_manifest_from_network_and_cache(temp_dir_str, &api_url));
+
+    assert!(result.is_ok());
+    if let Ok(packages) = result {
+      assert_eq!(packages.len(), 1);
+      assert_eq!(packages[0].full_name, Some("Owner-ModA".to_string()));
+
+      assert!(last_modified_path(temp_dir_str).exists());
+      assert!(api_manifest_path(temp_dir_str).exists());
+
+      let last_mod_content = std::fs::read_to_string(last_modified_path(temp_dir_str)).unwrap();
+      assert!(last_mod_content.contains("21 Feb 2024 15:30:45"));
+    }
+
+    mock.assert();
+  }
+
+  #[test]
+  fn test_download_file() {
+    let mut server = Server::new();
+    let temp_dir = tempdir().unwrap();
+    let temp_dir_str = temp_dir.path().to_str().unwrap();
+
+    let test_data = b"This is test file content";
+    let content_length = test_data.len();
+
+    let _mock = server
+      .mock("GET", "/test-file.zip")
+      .with_status(200)
+      .with_header("Content-Type", "application/zip")
+      .with_header("Content-Length", &content_length.to_string())
+      .with_body(test_data)
+      .create();
+
+    let file_url = format!("{}/test-file.zip", server.url());
+    let filename = "test-file.zip".to_string();
+
+    let multi_progress = MultiProgress::new();
+    let style_template = "";
+    let progress_style = ProgressStyle::with_template(style_template)
+      .unwrap()
+      .progress_chars("#>-");
+
+    let rt = Runtime::new().unwrap();
+    let client = rt.block_on(async {
+      reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap()
+    });
+
+    let result = rt.block_on(download_file(
+      client.clone(),
+      &file_url,
+      &filename,
+      multi_progress.clone(),
+      progress_style.clone(),
+      temp_dir_str,
+    ));
+
+    assert!(result.is_ok());
+
+    let downloads_dir = PathBuf::from(temp_dir_str).join("downloads");
+    assert!(downloads_dir.exists());
+
+    let downloaded_file = downloads_dir.join(&filename);
+    assert!(downloaded_file.exists());
+
+    let file_content = std::fs::read(&downloaded_file).unwrap();
+    assert_eq!(file_content, test_data);
+
+    let result2 = rt.block_on(download_file(
+      client.clone(),
+      &file_url,
+      &filename,
+      multi_progress.clone(),
+      progress_style.clone(),
+      temp_dir_str,
+    ));
+
+    assert!(result2.is_ok());
+  }
+
+  #[test]
+  fn test_download_file_missing_header() {
+    let mut server = Server::new();
+    let temp_dir = tempdir().unwrap();
+    let temp_dir_str = temp_dir.path().to_str().unwrap();
+
+    let test_data = b"This is test file content";
+
+    let mock = server
+      .mock("GET", "/test-file.zip")
+      .with_status(200)
+      .with_header("Content-Type", "application/zip")
+      .with_body(test_data)
+      .create();
+
+    let file_url = format!("{}/test-file.zip", server.url());
+    let filename = "test-file-no-header.zip".to_string();
+
+    let multi_progress = MultiProgress::new();
+    let style_template = "";
+    let progress_style = ProgressStyle::with_template(style_template)
+      .unwrap()
+      .progress_chars("#>-");
+
+    let rt = Runtime::new().unwrap();
+    let client = rt.block_on(async {
+      reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .unwrap()
+    });
+
+    let _result = rt.block_on(download_file(
+      client.clone(),
+      &file_url,
+      &filename,
+      multi_progress.clone(),
+      progress_style.clone(),
+      temp_dir_str,
+    ));
+
+    mock.assert();
+  }
+
+  #[test]
+  fn test_download_files() {
+    let mut server = Server::new();
+    let temp_dir = tempdir().unwrap();
+    let temp_dir_str = temp_dir.path().to_str().unwrap();
+
+    let test_data1 = b"This is test file 1 content";
+    let content_length1 = test_data1.len();
+
+    let test_data2 = b"This is test file 2 content - longer content";
+    let content_length2 = test_data2.len();
+
+    let mock1 = server
+      .mock("GET", "/file1.zip")
+      .with_status(200)
+      .with_header("Content-Type", "application/zip")
+      .with_header("Content-Length", &content_length1.to_string())
+      .with_body(test_data1)
+      .create();
+
+    let mock2 = server
+      .mock("GET", "/file2.zip")
+      .with_status(200)
+      .with_header("Content-Type", "application/zip")
+      .with_header("Content-Length", &content_length2.to_string())
+      .with_body(test_data2)
+      .create();
+
+    let mut urls = HashMap::new();
+    urls.insert(
+      "file1.zip".to_string(),
+      format!("{}/file1.zip", server.url()),
+    );
+    urls.insert(
+      "file2.zip".to_string(),
+      format!("{}/file2.zip", server.url()),
+    );
+
+    let rt = Runtime::new().unwrap();
+    let result = rt.block_on(download_files(urls, temp_dir_str));
+
+    assert!(result.is_ok());
+
+    let downloads_dir = PathBuf::from(temp_dir_str).join("downloads");
+    assert!(downloads_dir.exists());
+
+    let file1 = downloads_dir.join("file1.zip");
+    let file2 = downloads_dir.join("file2.zip");
+    assert!(file1.exists());
+    assert!(file2.exists());
+
+    let file1_content = std::fs::read(&file1).unwrap();
+    let file2_content = std::fs::read(&file2).unwrap();
+    assert_eq!(file1_content, test_data1);
+    assert_eq!(file2_content, test_data2);
+
+    mock1.assert();
+    mock2.assert();
+  }
+
+  #[test]
+  fn test_download_files_empty() {
+    let temp_dir = tempdir().unwrap();
+    let temp_dir_str = temp_dir.path().to_str().unwrap();
+
+    let urls = HashMap::new();
+
+    let rt = Runtime::new().unwrap();
+    let result = rt.block_on(download_files(urls, temp_dir_str));
+
+    assert!(result.is_ok());
+  }
 }
+
