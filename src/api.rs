@@ -300,8 +300,10 @@ async fn write_cache_to_disk<T: AsRef<Path>>(
       .map_err(|e| AppError::Manifest(format!("Failed to compress data: {}", e)))?;
 
     file.write_all(&compressed_data).await?;
+    file.flush().await?;
   } else {
     file.write_all(contents).await?;
+    file.flush().await?;
   }
 
   Ok(())
