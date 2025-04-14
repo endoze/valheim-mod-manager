@@ -3,7 +3,6 @@
 [![Build Status](https://github.com/endoze/valheim-mod-manager/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/endoze/valheim-mod-manager/actions?query=branch%3Amaster)
 [![Coverage Status](https://coveralls.io/repos/github/endoze/valheim-mod-manager/badge.svg?branch=master)](https://coveralls.io/github/endoze/valheim-mod-manager?branch=master)
 [![Crate](https://img.shields.io/crates/v/valheim-mod-manager.svg)](https://crates.io/crates/valheim-mod-manager)
-[![Docs](https://docs.rs/valheim-mod-manager/badge.svg)](https://docs.rs/valheim-mod-manager)
 
 A command-line tool for managing and automatically downloading Valheim mods and their dependencies.
 
