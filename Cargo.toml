@@ -10,6 +10,8 @@ repository = "https://github.com/Endoze/valheim-mod-manager"
 documentation = "https://docs.rs/valheim-mod-manager"
 homepage = "https://github.com/Endoze/valheim-mod-manager"
 rust-version = "1.85.0"
+categories = ["game-development", "command-line-utilities"]
+keywords = ["valheim", "mod", "manager", "game", "modding"]
 
 [[bin]]
 name = "vmm"
