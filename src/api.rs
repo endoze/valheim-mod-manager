@@ -1,5 +1,5 @@
 use crate::error::{AppError, AppResult};
-use crate::package::Package;
+use crate::package::{Package, PackageManifest};
 
 use chrono::prelude::*;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -14,7 +14,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const API_URL: &str = "https://stacklands.thunderstore.io/c/valheim/api/v1/package/";
 const LAST_MODIFIED_FILENAME: &str = "last_modified";
-const API_MANIFEST_FILENAME: &str = "api_manifest.bin.zst";
+const API_MANIFEST_FILENAME: &str = "api_manifest_v2.bin.zst";
+const API_MANIFEST_FILENAME_V1: &str = "api_manifest.bin.zst";
 
 /// Returns the path to the last_modified file in the cache directory.
 fn last_modified_path(cache_dir: &str) -> PathBuf {
@@ -32,6 +33,14 @@ fn api_manifest_path(cache_dir: &str) -> PathBuf {
   path
 }
 
+/// Returns the path to the old v1 api_manifest file in the cache directory.
+fn api_manifest_path_v1(cache_dir: &str) -> PathBuf {
+  let expanded_path = shellexpand::tilde(cache_dir);
+  let mut path = PathBuf::from(expanded_path.as_ref());
+  path.push(API_MANIFEST_FILENAME_V1);
+  path
+}
+
 /// Retrieves the manifest of available packages.
 ///
 /// This function first checks if there's a cached manifest file that is up-to-date.
@@ -45,7 +54,7 @@ fn api_manifest_path(cache_dir: &str) -> PathBuf {
 ///
 /// # Returns
 ///
-/// A `HashMap` where keys are package full names and values are the corresponding `Package` objects.
+/// A `PackageManifest` containing all available packages in SoA format.
 ///
 /// # Errors
 ///
@@ -53,60 +62,111 @@ fn api_manifest_path(cache_dir: &str) -> PathBuf {
 /// - Failed to check or retrieve last modified dates
 /// - Network request fails
 /// - Parsing fails
-pub async fn get_manifest(
-  cache_dir: &str,
-  api_url: Option<&str>,
-) -> AppResult<HashMap<String, Package>> {
+pub async fn get_manifest(cache_dir: &str, api_url: Option<&str>) -> AppResult<PackageManifest> {
   let api_url = api_url.unwrap_or(API_URL);
   let last_modified = local_last_modified(cache_dir).await?;
   tracing::info!("Manifest last modified: {}", last_modified);
 
-  let packages = if api_manifest_file_exists(cache_dir)
-    && network_last_modified(api_url).await? <= last_modified
-  {
+  if api_manifest_file_exists(cache_dir) && network_last_modified(api_url).await? <= last_modified {
     tracing::info!("Loading manifest from cache");
-    get_manifest_from_disk(cache_dir).await?
+    get_manifest_from_disk(cache_dir).await
   } else {
     tracing::info!("Downloading new manifest");
-    get_manifest_from_network_and_cache(cache_dir, api_url).await?
-  };
-
-  Ok(
-    packages
-      .into_iter()
-      .filter_map(|pkg| {
-        let name = pkg.full_name.clone()?;
-
-        Some((name, pkg))
-      })
-      .collect(),
-  )
+    get_manifest_from_network_and_cache(cache_dir, api_url).await
+  }
 }
 
 /// Reads the cached API manifest from disk.
 ///
+/// Attempts to read the new v2 format first, falls back to v1 format if needed.
+/// When v1 format is detected, it automatically migrates to v2.
+///
 /// # Returns
 ///
-/// The deserialized manifest as a Vec<Package>.
+/// The deserialized manifest as a PackageManifest.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The file cannot be opened or read
 /// - The data cannot be decompressed or deserialized
-async fn get_manifest_from_disk(cache_dir: &str) -> AppResult<Vec<Package>> {
-  let path = api_manifest_path(cache_dir);
-  let mut file = fs::File::open(path).await?;
-  let mut compressed_data = Vec::new();
-  file.read_to_end(&mut compressed_data).await?;
+async fn get_manifest_from_disk(cache_dir: &str) -> AppResult<PackageManifest> {
+  let path_v2 = api_manifest_path(cache_dir);
+  let path_v1 = api_manifest_path_v1(cache_dir);
 
-  let decompressed_data = zstd::decode_all(compressed_data.as_slice())
-    .map_err(|e| AppError::Manifest(format!("Failed to decompress manifest: {}", e)))?;
+  if path_v2.exists() {
+    tracing::debug!("Loading v2 manifest format");
 
-  let packages: Vec<Package> = bincode::deserialize(&decompressed_data)
-    .map_err(|e| AppError::Manifest(format!("Failed to deserialize manifest: {}", e)))?;
+    let mut file = fs::File::open(&path_v2).await?;
+    let mut compressed_data = Vec::new();
+    file.read_to_end(&mut compressed_data).await?;
 
-  Ok(packages)
+    let decompressed_data = zstd::decode_all(compressed_data.as_slice())
+      .map_err(|e| AppError::Manifest(format!("Failed to decompress v2 manifest: {}", e)))?;
+
+    let manifest: PackageManifest = bincode::deserialize(&decompressed_data)
+      .map_err(|e| AppError::Manifest(format!("Failed to deserialize v2 manifest: {}", e)))?;
+
+    manifest
+      .validate()
+      .map_err(|e| AppError::Manifest(format!("V2 manifest validation failed: {}", e)))?;
+
+    Ok(manifest)
+  } else {
+    if path_v1.exists() {
+      tracing::info!("Found v1 manifest, migrating to v2 format");
+
+      let mut file = fs::File::open(&path_v1).await?;
+      let mut compressed_data = Vec::new();
+      file.read_to_end(&mut compressed_data).await?;
+
+      let decompressed_data = zstd::decode_all(compressed_data.as_slice())
+        .map_err(|e| AppError::Manifest(format!("Failed to decompress v1 manifest: {}", e)))?;
+
+      let packages: Vec<Package> = bincode::deserialize(&decompressed_data)
+        .map_err(|e| AppError::Manifest(format!("Failed to deserialize v1 manifest: {}", e)))?;
+
+      let manifest: PackageManifest = packages.into();
+
+      manifest.validate().map_err(|e| {
+        AppError::Manifest(format!(
+          "V2 manifest validation failed during migration: {}",
+          e
+        ))
+      })?;
+
+      let binary_data = bincode::serialize(&manifest)
+        .map_err(|e| AppError::Manifest(format!("Failed to serialize v2 manifest: {}", e)))?;
+
+      write_cache_to_disk(path_v2.clone(), &binary_data, true).await?;
+
+      match tokio::fs::metadata(&path_v2).await {
+        Ok(metadata) if metadata.len() > 0 => {
+          tracing::info!("V2 manifest written successfully, removing v1");
+
+          if let Err(e) = fs::remove_file(&path_v1).await {
+            tracing::warn!(
+              "Failed to remove old v1 manifest (keeping as backup): {}",
+              e
+            );
+          }
+        }
+        Ok(_) => {
+          tracing::error!("V2 manifest written but is empty, keeping v1 as backup");
+        }
+        Err(e) => {
+          tracing::error!(
+            "Failed to verify v2 manifest write: {}, keeping v1 as backup",
+            e
+          );
+        }
+      }
+
+      return Ok(manifest);
+    }
+
+    Err(AppError::Manifest("No cached manifest found".to_string()))
+  }
 }
 
 /// Downloads the manifest from the API server and filters out unnecessary fields.
@@ -169,6 +229,7 @@ async fn get_manifest_from_network(
 ///
 /// This function retrieves the manifest from the API server and saves both
 /// the manifest content and the last modified date to disk.
+/// The manifest is converted to the SoA format before caching.
 ///
 /// # Parameters
 ///
@@ -177,7 +238,7 @@ async fn get_manifest_from_network(
 ///
 /// # Returns
 ///
-/// The manifest data as Vec<Package>.
+/// The manifest data as PackageManifest.
 ///
 /// # Errors
 ///
@@ -187,7 +248,7 @@ async fn get_manifest_from_network(
 async fn get_manifest_from_network_and_cache(
   cache_dir: &str,
   api_url: &str,
-) -> AppResult<Vec<Package>> {
+) -> AppResult<PackageManifest> {
   let results = get_manifest_from_network(api_url).await?;
   let packages = results.0;
   let last_modified_from_network = results.1;
@@ -199,12 +260,13 @@ async fn get_manifest_from_network_and_cache(
   )
   .await?;
 
-  let binary_data = bincode::serialize(&packages)
+  let manifest: PackageManifest = packages.into();
+  let binary_data = bincode::serialize(&manifest)
     .map_err(|e| AppError::Manifest(format!("Failed to serialize manifest: {}", e)))?;
 
   write_cache_to_disk(api_manifest_path(cache_dir), &binary_data, true).await?;
 
-  Ok(packages)
+  Ok(manifest)
 }
 
 /// Retrieves the last modified date from the local cache file.
@@ -294,7 +356,8 @@ fn api_manifest_file_exists(cache_dir: &str) -> bool {
 ///
 /// * `path` - The path to the cache file
 /// * `contents` - The data to write to the file
-/// * `use_compression` - If true, the data will be compressed with zstd
+/// * `use_compression` - If true, the data will be compressed with zstd level 9
+///   (balanced compression ratio for SoA structure's repetitive patterns)
 ///
 /// # Errors
 ///
@@ -324,7 +387,7 @@ async fn write_cache_to_disk<T: AsRef<Path>>(
     .await?;
 
   if use_compression {
-    let compressed_data = zstd::encode_all(contents, 3)
+    let compressed_data = zstd::encode_all(contents, 9)
       .map_err(|e| AppError::Manifest(format!("Failed to compress data: {}", e)))?;
 
     file.write_all(&compressed_data).await?;
@@ -482,6 +545,9 @@ async fn download_file(
     progress_bar.inc(chunk.len() as u64);
   }
 
+  file.flush().await?;
+  file.sync_all().await?;
+
   progress_bar.finish();
 
   Ok(())
@@ -613,7 +679,8 @@ mod tests {
     };
 
     let packages = vec![package];
-    let binary_data = bincode::serialize(&packages).unwrap();
+    let manifest: PackageManifest = packages.into();
+    let binary_data = bincode::serialize(&manifest).unwrap();
 
     let rt = Runtime::new().unwrap();
     let result = rt.block_on(write_cache_to_disk(&api_manifest_path, &binary_data, true));
@@ -623,11 +690,11 @@ mod tests {
 
     let compressed_data = std::fs::read(&api_manifest_path).unwrap();
     let decompressed_data = zstd::decode_all(compressed_data.as_slice()).unwrap();
-    let decoded_packages: Vec<Package> = bincode::deserialize(&decompressed_data).unwrap();
+    let decoded_manifest: PackageManifest = bincode::deserialize(&decompressed_data).unwrap();
 
-    assert_eq!(decoded_packages.len(), 1);
+    assert_eq!(decoded_manifest.len(), 1);
     assert_eq!(
-      decoded_packages[0].full_name,
+      decoded_manifest.full_names[0],
       Some("TestOwner-TestMod".to_string())
     );
   }
@@ -679,18 +746,19 @@ mod tests {
     };
 
     let packages = vec![package];
-    let binary_data = bincode::serialize(&packages).unwrap();
-    let compressed_data = zstd::encode_all(binary_data.as_slice(), 3).unwrap();
+    let manifest: PackageManifest = packages.into();
+    let binary_data = bincode::serialize(&manifest).unwrap();
+    let compressed_data = zstd::encode_all(binary_data.as_slice(), 9).unwrap();
     let mut path = PathBuf::from(temp_dir_str);
     path.push(API_MANIFEST_FILENAME);
     let mut file = File::create(path).unwrap();
     file.write_all(&compressed_data).unwrap();
 
     let rt = Runtime::new().unwrap();
-    let packages = rt.block_on(get_manifest_from_disk(temp_dir_str)).unwrap();
+    let manifest = rt.block_on(get_manifest_from_disk(temp_dir_str)).unwrap();
 
-    assert_eq!(packages.len(), 1);
-    assert_eq!(packages[0].full_name, Some("Owner-ModA".to_string()));
+    assert_eq!(manifest.len(), 1);
+    assert_eq!(manifest.full_names[0], Some("Owner-ModA".to_string()));
   }
 
   #[test]
@@ -820,8 +888,9 @@ mod tests {
     };
 
     let packages = vec![package];
-    let binary_data = bincode::serialize(&packages).unwrap();
-    let compressed_data = zstd::encode_all(binary_data.as_slice(), 3).unwrap();
+    let manifest: PackageManifest = packages.into();
+    let binary_data = bincode::serialize(&manifest).unwrap();
+    let compressed_data = zstd::encode_all(binary_data.as_slice(), 9).unwrap();
 
     std::fs::create_dir_all(PathBuf::from(temp_dir_str)).unwrap();
 
@@ -842,6 +911,54 @@ mod tests {
     let result = rt.block_on(get_manifest(temp_dir_str, None));
 
     assert!(result.is_ok());
+  }
+
+  #[test]
+  fn test_manifest_v1_to_v2_migration() {
+    let temp_dir = tempdir().unwrap();
+    let temp_dir_str = temp_dir.path().to_str().unwrap();
+
+    let package = Package {
+      name: Some("OldMod".to_string()),
+      full_name: Some("OldOwner-OldMod".to_string()),
+      owner: Some("OldOwner".to_string()),
+      package_url: Some("https://example.com/OldMod".to_string()),
+      date_created: OffsetDateTime::now_utc(),
+      date_updated: OffsetDateTime::now_utc(),
+      uuid4: Some("old-uuid".to_string()),
+      rating_score: Some(4),
+      is_pinned: Some(false),
+      is_deprecated: Some(false),
+      has_nsfw_content: Some(false),
+      categories: vec!["legacy".to_string()],
+      versions: vec![],
+    };
+
+    let packages = vec![package];
+    let binary_data = bincode::serialize(&packages).unwrap();
+    let compressed_data = zstd::encode_all(binary_data.as_slice(), 9).unwrap();
+
+    std::fs::create_dir_all(PathBuf::from(temp_dir_str)).unwrap();
+
+    let mut v1_path = PathBuf::from(temp_dir_str);
+    v1_path.push(API_MANIFEST_FILENAME_V1);
+    let mut file = File::create(&v1_path).unwrap();
+    file.write_all(&compressed_data).unwrap();
+
+    let v2_path = PathBuf::from(temp_dir_str).join(API_MANIFEST_FILENAME);
+    assert!(!v2_path.exists());
+    assert!(v1_path.exists());
+
+    let rt = Runtime::new().unwrap();
+    let result = rt.block_on(get_manifest_from_disk(temp_dir_str));
+
+    assert!(result.is_ok());
+    let manifest = result.unwrap();
+    assert_eq!(manifest.len(), 1);
+    assert_eq!(manifest.full_names[0], Some("OldOwner-OldMod".to_string()));
+
+    assert!(v2_path.exists(), "v2 manifest should be created");
+    assert!(!v1_path.exists(), "v1 manifest should be removed");
   }
 
   #[test]
@@ -900,9 +1017,9 @@ mod tests {
     let result = rt.block_on(get_manifest_from_network_and_cache(temp_dir_str, &api_url));
 
     assert!(result.is_ok());
-    if let Ok(packages) = result {
-      assert_eq!(packages.len(), 1);
-      assert_eq!(packages[0].full_name, Some("Owner-ModA".to_string()));
+    if let Ok(manifest) = result {
+      assert_eq!(manifest.len(), 1);
+      assert_eq!(manifest.full_names[0], Some("Owner-ModA".to_string()));
 
       assert!(last_modified_path(temp_dir_str).exists());
       assert!(api_manifest_path(temp_dir_str).exists());
@@ -1097,4 +1214,3 @@ mod tests {
     assert!(result.is_ok());
   }
 }
-

@@ -185,20 +185,20 @@ fn process_zip_file(downloads_dir: &Path, file_path: &PathBuf) -> AppResult<()> 
   let should_extract = should_extract_mod(&mod_dir, &mod_name, zip_version)?;
 
   fs::create_dir_all(&mod_dir).map_err(|e| {
-    AppError::Io(io::Error::new(
-      io::ErrorKind::Other,
-      format!("Failed to create directory for {}: {}", mod_name, e),
-    ))
+    AppError::Io(io::Error::other(format!(
+      "Failed to create directory for {}: {}",
+      mod_name, e
+    )))
   })?;
 
   if should_extract {
     debug!("Extracting {} to {}", file_name, mod_dir.display());
 
     let file = fs::File::open(file_path).map_err(|e| {
-      AppError::Io(io::Error::new(
-        io::ErrorKind::Other,
-        format!("Failed to open {} for unzipping: {}", file_name, e),
-      ))
+      AppError::Io(io::Error::other(format!(
+        "Failed to open {} for unzipping: {}",
+        file_name, e
+      )))
     })?;
 
     unzip(file, &mod_dir)?;
@@ -297,10 +297,10 @@ fn copy_mod_to_install_dir(mod_dir: &Path, install_dir: &str, mod_name: &str) ->
     );
 
     fs::create_dir_all(&install_path).map_err(|e| {
-      AppError::Io(io::Error::new(
-        io::ErrorKind::Other,
-        format!("Failed to create install directory {}: {}", install_dir, e),
-      ))
+      AppError::Io(io::Error::other(format!(
+        "Failed to create install directory {}: {}",
+        install_dir, e
+      )))
     })?;
   }
 
@@ -313,14 +313,11 @@ fn copy_mod_to_install_dir(mod_dir: &Path, install_dir: &str, mod_name: &str) ->
 
   if !target_dir.exists() {
     fs::create_dir_all(&target_dir).map_err(|e| {
-      AppError::Io(io::Error::new(
-        io::ErrorKind::Other,
-        format!(
-          "Failed to create target directory {}: {}",
-          target_dir.display(),
-          e
-        ),
-      ))
+      AppError::Io(io::Error::other(format!(
+        "Failed to create target directory {}: {}",
+        target_dir.display(),
+        e
+      )))
     })?;
   }
 
@@ -342,12 +339,8 @@ fn copy_mod_to_install_dir(mod_dir: &Path, install_dir: &str, mod_name: &str) ->
       target_dir.display()
     );
 
-    copy_items(&entries, &target_dir, &options).map_err(|e| {
-      AppError::Io(io::Error::new(
-        io::ErrorKind::Other,
-        format!("Failed to copy mod files: {}", e),
-      ))
-    })?;
+    copy_items(&entries, &target_dir, &options)
+      .map_err(|e| AppError::Io(io::Error::other(format!("Failed to copy mod files: {}", e))))?;
   }
 
   debug!(
@@ -621,5 +614,72 @@ mod tests {
 
     let entries = fs::read_dir(&target_dir).unwrap().count();
     assert_eq!(entries, 0);
+  }
+
+  #[test]
+  fn test_unzip_with_directory_in_zip() {
+    let temp_dir = tempdir().unwrap();
+    let output_dir = temp_dir.path().join("output");
+    fs::create_dir_all(&output_dir).unwrap();
+
+    let zip_path = temp_dir.path().join("test_with_dir.zip");
+    let file = File::create(&zip_path).unwrap();
+    let mut zip = ZipWriter::new(file);
+
+    let options: FileOptions<'_, ()> =
+      FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    zip.add_directory("test_dir/", options).unwrap();
+
+    zip.start_file("test_dir/file_in_dir.txt", options).unwrap();
+    zip.write_all(b"File in directory").unwrap();
+
+    zip.finish().unwrap();
+
+    let file = File::open(&zip_path).unwrap();
+    let result = unzip(file, &output_dir);
+
+    assert!(result.is_ok());
+
+    let dir_path = output_dir.join("test_dir");
+    assert!(dir_path.exists());
+    assert!(dir_path.is_dir());
+
+    let file_in_dir = dir_path.join("file_in_dir.txt");
+    assert!(file_in_dir.exists());
+
+    let content = fs::read_to_string(&file_in_dir).unwrap();
+    assert_eq!(content, "File in directory");
+  }
+
+  #[test]
+  fn test_unzip_with_nested_directories() {
+    let temp_dir = tempdir().unwrap();
+    let output_dir = temp_dir.path().join("output");
+
+    let zip_path = temp_dir.path().join("test_nested.zip");
+    let file = File::create(&zip_path).unwrap();
+    let mut zip = ZipWriter::new(file);
+
+    let options: FileOptions<'_, ()> =
+      FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    zip
+      .start_file("deep/nested/path/file.txt", options)
+      .unwrap();
+    zip.write_all(b"Deep nested file").unwrap();
+
+    zip.finish().unwrap();
+
+    let file = File::open(&zip_path).unwrap();
+    let result = unzip(file, &output_dir);
+
+    assert!(result.is_ok());
+
+    let nested_file = output_dir.join("deep/nested/path/file.txt");
+    assert!(nested_file.exists());
+
+    let content = fs::read_to_string(&nested_file).unwrap();
+    assert_eq!(content, "Deep nested file");
   }
 }

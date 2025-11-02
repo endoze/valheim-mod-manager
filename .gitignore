@@ -4,3 +4,4 @@
 downloads/*
 vmm_config.toml
 /coverage
+benches/fixtures/*.bin.zst
