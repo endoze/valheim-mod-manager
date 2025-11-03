@@ -54,16 +54,15 @@ async fn main() -> AppResult<()> {
       let manifest = api::get_manifest(&APP_CONFIG.cache_dir, None).await?;
       let search_term = search_args.term.to_lowercase();
 
-      let search_results: Vec<_> = manifest
-        .iter()
-        .filter(|(_, package)| {
-          if let Some(name) = &package.name {
+      let search_results: Vec<usize> = (0..manifest.len())
+        .filter(|&idx| {
+          if let Some(name) = &manifest.names[idx] {
             if name.to_lowercase().contains(&search_term) {
               return true;
             }
           }
 
-          if let Some(full_name) = &package.full_name {
+          if let Some(full_name) = &manifest.full_names[idx] {
             if full_name.to_lowercase().contains(&search_term) {
               return true;
             }
@@ -82,25 +81,31 @@ async fn main() -> AppResult<()> {
           search_args.term
         );
 
-        for (full_name, package) in search_results {
-          let version = package.latest_version().map_or("Unknown".to_string(), |v| {
-            v.version_number
-              .clone()
-              .unwrap_or_else(|| "Unknown".to_string())
-          });
+        for idx in search_results {
+          let version = manifest
+            .get_latest_version_at(idx)
+            .and_then(|ver_idx| manifest.versions.version_numbers[ver_idx].clone())
+            .unwrap_or_else(|| "Unknown".to_string());
 
-          let description = package
-            .latest_version()
-            .and_then(|v| v.description.clone())
+          let description = manifest
+            .get_latest_version_at(idx)
+            .and_then(|ver_idx| manifest.versions.descriptions[ver_idx].clone())
             .unwrap_or_default();
-          let name = package.name.as_ref().unwrap_or(full_name);
-          let unknown = "Unknown".to_string();
-          let owner = package.owner.as_ref().unwrap_or(&unknown);
+
+          let name = manifest.names[idx]
+            .as_ref()
+            .or(manifest.full_names[idx].as_ref())
+            .map(|s| s.as_str())
+            .unwrap_or("Unknown");
+
+          let owner = manifest.owners[idx].as_deref().unwrap_or("Unknown");
 
           println!("{}-{} ({})", owner, name, version);
+
           if !description.is_empty() {
             println!("  {}", description);
           }
+
           println!();
         }
       }
