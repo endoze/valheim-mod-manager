@@ -1,6 +1,6 @@
 [package]
 name = "valheim-mod-manager"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "Mod manager for Valheim game"
 authors = ["Endoze <endoze@endozemedia.com>", "LinkTheDot <CirnoStrongest9909@hotmail.com>"]
