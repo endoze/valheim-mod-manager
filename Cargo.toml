@@ -43,6 +43,7 @@ zip = "2.2.3"
 bincode = "1.3.3"
 zstd = "0.13.0"
 fs_extra = "1.3.0"
+lasso = { version = "0.7", features = ["serialize"] }
 
 [dev-dependencies]
 mockito = "1.2.0"

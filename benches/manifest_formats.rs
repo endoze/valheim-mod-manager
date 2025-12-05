@@ -1,7 +1,9 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use std::fs;
 use std::path::PathBuf;
-use valheim_mod_manager::package::{Package, PackageManifest};
+use valheim_mod_manager::package::{
+  InternedPackageManifest, Package, PackageManifest, SerializableInternedManifest,
+};
 
 fn load_real_manifest_v1() -> Option<Vec<Package>> {
   let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -18,6 +20,7 @@ fn load_real_manifest_v1() -> Option<Vec<Package>> {
   bincode::deserialize(&decompressed_data).ok()
 }
 
+#[allow(dead_code)]
 fn load_real_manifest_v2() -> Option<PackageManifest> {
   let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
     .join("benches")
@@ -33,6 +36,23 @@ fn load_real_manifest_v2() -> Option<PackageManifest> {
   bincode::deserialize(&decompressed_data).ok()
 }
 
+#[allow(dead_code)]
+fn load_real_manifest_v3() -> Option<InternedPackageManifest> {
+  let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    .join("benches")
+    .join("fixtures")
+    .join("api_manifest_v3.bin.zst");
+
+  if !path.exists() {
+    return None;
+  }
+
+  let compressed_data = fs::read(&path).ok()?;
+  let decompressed_data = zstd::decode_all(compressed_data.as_slice()).ok()?;
+  let serializable: SerializableInternedManifest = bincode::deserialize(&decompressed_data).ok()?;
+  serializable.try_into().ok()
+}
+
 fn benchmark_serialization(c: &mut Criterion) {
   let v1_packages = match load_real_manifest_v1() {
     Some(packages) => packages,
@@ -44,6 +64,7 @@ fn benchmark_serialization(c: &mut Criterion) {
   };
 
   let v2_manifest: PackageManifest = v1_packages.clone().into();
+  let v3_manifest: InternedPackageManifest = v1_packages.clone().into();
 
   let mut group = c.benchmark_group("serialization");
   group.throughput(Throughput::Elements(v1_packages.len() as u64));
@@ -62,6 +83,14 @@ fn benchmark_serialization(c: &mut Criterion) {
     })
   });
 
+  group.bench_function("v3_format", |b| {
+    b.iter(|| {
+      let serializable: SerializableInternedManifest = black_box(&v3_manifest).into();
+      let serialized = bincode::serialize(&serializable).unwrap();
+      black_box(serialized)
+    })
+  });
+
   group.finish();
 }
 
@@ -76,9 +105,12 @@ fn benchmark_deserialization(c: &mut Criterion) {
   };
 
   let v2_manifest: PackageManifest = v1_packages.clone().into();
+  let v3_manifest: InternedPackageManifest = v1_packages.clone().into();
+  let v3_serializable: SerializableInternedManifest = (&v3_manifest).into();
 
   let v1_serialized = bincode::serialize(&v1_packages).unwrap();
   let v2_serialized = bincode::serialize(&v2_manifest).unwrap();
+  let v3_serialized = bincode::serialize(&v3_serializable).unwrap();
 
   let mut group = c.benchmark_group("deserialization");
   group.throughput(Throughput::Elements(v1_packages.len() as u64));
@@ -97,6 +129,15 @@ fn benchmark_deserialization(c: &mut Criterion) {
     })
   });
 
+  group.bench_function("v3_format", |b| {
+    b.iter(|| {
+      let serializable: SerializableInternedManifest =
+        bincode::deserialize(black_box(&v3_serialized)).unwrap();
+      let deserialized: InternedPackageManifest = serializable.try_into().unwrap();
+      black_box(deserialized)
+    })
+  });
+
   group.finish();
 }
 
@@ -111,9 +152,12 @@ fn benchmark_compression(c: &mut Criterion) {
   };
 
   let v2_manifest: PackageManifest = v1_packages.clone().into();
+  let v3_manifest: InternedPackageManifest = v1_packages.clone().into();
+  let v3_serializable: SerializableInternedManifest = (&v3_manifest).into();
 
   let v1_serialized = bincode::serialize(&v1_packages).unwrap();
   let v2_serialized = bincode::serialize(&v2_manifest).unwrap();
+  let v3_serialized = bincode::serialize(&v3_serializable).unwrap();
 
   let mut group = c.benchmark_group("compression");
 
@@ -128,6 +172,13 @@ fn benchmark_compression(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::new("v2_format", level), level, |b, &level| {
       b.iter(|| {
         let compressed = zstd::encode_all(black_box(v2_serialized.as_slice()), level).unwrap();
+        black_box(compressed)
+      })
+    });
+
+    group.bench_with_input(BenchmarkId::new("v3_format", level), level, |b, &level| {
+      b.iter(|| {
+        let compressed = zstd::encode_all(black_box(v3_serialized.as_slice()), level).unwrap();
         black_box(compressed)
       })
     });
@@ -147,15 +198,19 @@ fn benchmark_decompression(c: &mut Criterion) {
   };
 
   let v2_manifest: PackageManifest = v1_packages.clone().into();
+  let v3_manifest: InternedPackageManifest = v1_packages.clone().into();
+  let v3_serializable: SerializableInternedManifest = (&v3_manifest).into();
 
   let v1_serialized = bincode::serialize(&v1_packages).unwrap();
   let v2_serialized = bincode::serialize(&v2_manifest).unwrap();
+  let v3_serialized = bincode::serialize(&v3_serializable).unwrap();
 
   let mut group = c.benchmark_group("decompression");
 
   for level in [3, 9].iter() {
     let v1_compressed = zstd::encode_all(v1_serialized.as_slice(), *level).unwrap();
     let v2_compressed = zstd::encode_all(v2_serialized.as_slice(), *level).unwrap();
+    let v3_compressed = zstd::encode_all(v3_serialized.as_slice(), *level).unwrap();
 
     group.bench_with_input(BenchmarkId::new("v1_format", level), level, |b, _level| {
       b.iter(|| {
@@ -167,6 +222,13 @@ fn benchmark_decompression(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::new("v2_format", level), level, |b, _level| {
       b.iter(|| {
         let decompressed = zstd::decode_all(black_box(v2_compressed.as_slice())).unwrap();
+        black_box(decompressed)
+      })
+    });
+
+    group.bench_with_input(BenchmarkId::new("v3_format", level), level, |b, _level| {
+      b.iter(|| {
+        let decompressed = zstd::decode_all(black_box(v3_compressed.as_slice())).unwrap();
         black_box(decompressed)
       })
     });
@@ -186,27 +248,56 @@ fn benchmark_conversion(c: &mut Criterion) {
   };
 
   let v2_manifest: PackageManifest = v1_packages.clone().into();
+  let v3_manifest: InternedPackageManifest = v1_packages.clone().into();
 
   let mut group = c.benchmark_group("conversion");
   group.throughput(Throughput::Elements(v1_packages.len() as u64));
 
-  group.bench_function("vec_to_manifest", |b| {
+  group.bench_function("vec_to_v2_manifest", |b| {
     b.iter(|| {
       let manifest: PackageManifest = black_box(v1_packages.clone()).into();
       black_box(manifest)
     })
   });
 
-  group.bench_function("build_name_index", |b| {
+  group.bench_function("vec_to_v3_manifest", |b| {
+    b.iter(|| {
+      let manifest: InternedPackageManifest = black_box(v1_packages.clone()).into();
+      black_box(manifest)
+    })
+  });
+
+  group.bench_function("v2_to_v3_manifest", |b| {
+    b.iter(|| {
+      let manifest: InternedPackageManifest = black_box(v2_manifest.clone()).into();
+      black_box(manifest)
+    })
+  });
+
+  group.bench_function("v2_build_name_index", |b| {
     b.iter(|| {
       let index = black_box(&v2_manifest).build_name_index();
       black_box(index)
     })
   });
 
-  group.bench_function("get_package_by_name", |b| {
+  group.bench_function("v3_build_name_index", |b| {
+    b.iter(|| {
+      let index = black_box(&v3_manifest).build_name_index();
+      black_box(index)
+    })
+  });
+
+  group.bench_function("v2_get_package_by_name", |b| {
     b.iter(|| {
       let pkg = black_box(&v2_manifest).get_package_by_full_name("denikson-BepInExPack_Valheim");
+      black_box(pkg)
+    })
+  });
+
+  group.bench_function("v3_get_package_by_name", |b| {
+    b.iter(|| {
+      let pkg = black_box(&v3_manifest).get_package_by_full_name("denikson-BepInExPack_Valheim");
       black_box(pkg)
     })
   });
@@ -225,9 +316,12 @@ fn benchmark_size_comparison(c: &mut Criterion) {
   };
 
   let v2_manifest: PackageManifest = v1_packages.clone().into();
+  let v3_manifest: InternedPackageManifest = v1_packages.clone().into();
+  let v3_serializable: SerializableInternedManifest = (&v3_manifest).into();
 
   let v1_serialized = bincode::serialize(&v1_packages).unwrap();
   let v2_serialized = bincode::serialize(&v2_manifest).unwrap();
+  let v3_serialized = bincode::serialize(&v3_serializable).unwrap();
 
   println!("\n=== Size Comparison Report ===");
   println!("Packages: {}", v1_packages.len());
@@ -235,24 +329,47 @@ fn benchmark_size_comparison(c: &mut Criterion) {
     "Total versions: {}",
     v1_packages.iter().map(|p| p.versions.len()).sum::<usize>()
   );
+  println!(
+    "String table size: {} unique strings",
+    v3_serializable.string_table.len()
+  );
   println!("\nSerialized (bincode):");
   println!("  V1 format: {} bytes", v1_serialized.len());
   println!("  V2 format: {} bytes", v2_serialized.len());
+  println!("  V3 format: {} bytes", v3_serialized.len());
   println!(
-    "  Reduction: {:.1}%",
+    "  V2 vs V1: {:.1}%",
     (1.0 - v2_serialized.len() as f64 / v1_serialized.len() as f64) * 100.0
+  );
+  println!(
+    "  V3 vs V1: {:.1}%",
+    (1.0 - v3_serialized.len() as f64 / v1_serialized.len() as f64) * 100.0
+  );
+  println!(
+    "  V3 vs V2: {:.1}%",
+    (1.0 - v3_serialized.len() as f64 / v2_serialized.len() as f64) * 100.0
   );
 
   for level in [3, 9] {
     let v1_compressed = zstd::encode_all(v1_serialized.as_slice(), level).unwrap();
     let v2_compressed = zstd::encode_all(v2_serialized.as_slice(), level).unwrap();
+    let v3_compressed = zstd::encode_all(v3_serialized.as_slice(), level).unwrap();
 
     println!("\nCompressed (zstd level {}):", level);
     println!("  V1 format: {} bytes", v1_compressed.len());
     println!("  V2 format: {} bytes", v2_compressed.len());
+    println!("  V3 format: {} bytes", v3_compressed.len());
     println!(
-      "  Reduction: {:.1}%",
+      "  V2 vs V1: {:.1}%",
       (1.0 - v2_compressed.len() as f64 / v1_compressed.len() as f64) * 100.0
+    );
+    println!(
+      "  V3 vs V1: {:.1}%",
+      (1.0 - v3_compressed.len() as f64 / v1_compressed.len() as f64) * 100.0
+    );
+    println!(
+      "  V3 vs V2: {:.1}%",
+      (1.0 - v3_compressed.len() as f64 / v2_compressed.len() as f64) * 100.0
     );
     println!(
       "  V1 compression ratio: {:.2}x",
@@ -261,6 +378,10 @@ fn benchmark_size_comparison(c: &mut Criterion) {
     println!(
       "  V2 compression ratio: {:.2}x",
       v2_serialized.len() as f64 / v2_compressed.len() as f64
+    );
+    println!(
+      "  V3 compression ratio: {:.2}x",
+      v3_serialized.len() as f64 / v3_compressed.len() as f64
     );
   }
 

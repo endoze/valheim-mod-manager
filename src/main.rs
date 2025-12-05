@@ -2,6 +2,7 @@ mod api;
 mod cli;
 mod config;
 mod error;
+mod intern;
 mod logs;
 mod manifest;
 mod package;
@@ -41,7 +42,7 @@ async fn main() -> AppResult<()> {
         tracing::info!("Building dependency graph for mods");
 
         let dg = DependencyGraph::new(packages);
-        let urls = dg.resolve(&manifest);
+        let urls = dg.resolve_interned(&manifest);
 
         tracing::info!("Done building dependency graph, proceeding to download mods if necessary");
 
@@ -56,13 +57,13 @@ async fn main() -> AppResult<()> {
 
       let search_results: Vec<usize> = (0..manifest.len())
         .filter(|&idx| {
-          if let Some(name) = &manifest.names[idx] {
+          if let Some(name) = manifest.resolve_name_at(idx) {
             if name.to_lowercase().contains(&search_term) {
               return true;
             }
           }
 
-          if let Some(full_name) = &manifest.full_names[idx] {
+          if let Some(full_name) = manifest.resolve_full_name_at(idx) {
             if full_name.to_lowercase().contains(&search_term) {
               return true;
             }
@@ -84,21 +85,29 @@ async fn main() -> AppResult<()> {
         for idx in search_results {
           let version = manifest
             .get_latest_version_at(idx)
-            .and_then(|ver_idx| manifest.versions.version_numbers[ver_idx].clone())
+            .and_then(|ver_idx| {
+              intern::resolve_option(
+                &manifest.interner,
+                manifest.versions.version_numbers[ver_idx],
+              )
+            })
             .unwrap_or_else(|| "Unknown".to_string());
 
           let description = manifest
             .get_latest_version_at(idx)
-            .and_then(|ver_idx| manifest.versions.descriptions[ver_idx].clone())
+            .and_then(|ver_idx| {
+              intern::resolve_option(&manifest.interner, manifest.versions.descriptions[ver_idx])
+            })
             .unwrap_or_default();
 
-          let name = manifest.names[idx]
-            .as_ref()
-            .or(manifest.full_names[idx].as_ref())
-            .map(|s| s.as_str())
-            .unwrap_or("Unknown");
+          let name = manifest
+            .resolve_name_at(idx)
+            .or_else(|| manifest.resolve_full_name_at(idx))
+            .unwrap_or_else(|| "Unknown".to_string());
 
-          let owner = manifest.owners[idx].as_deref().unwrap_or("Unknown");
+          let owner = manifest
+            .resolve_owner_at(idx)
+            .unwrap_or_else(|| "Unknown".to_string());
 
           println!("{}-{} ({})", owner, name, version);
 
