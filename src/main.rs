@@ -46,9 +46,9 @@ async fn main() -> AppResult<()> {
 
         tracing::info!("Done building dependency graph, proceeding to download mods if necessary");
 
-        api::download_files(urls, &APP_CONFIG.cache_dir).await?;
+        api::download_files(urls.clone(), &APP_CONFIG.cache_dir).await?;
 
-        zip::unzip_downloaded_mods(&APP_CONFIG.cache_dir)?;
+        zip::unzip_downloaded_mods(&APP_CONFIG.cache_dir, &urls)?;
       }
     },
     Command::Search(search_args) => {

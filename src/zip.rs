@@ -1,5 +1,6 @@
 use fs_extra::copy_items;
 use fs_extra::dir::CopyOptions;
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use crate::manifest::Manifest;
 /// # Returns
 ///
 /// `Ok(())` if all files are processed successfully, or an error if reading the directory fails.
-pub fn unzip_downloaded_mods(cache_dir: &str) -> AppResult<()> {
+pub fn unzip_downloaded_mods(cache_dir: &str, urls: &HashMap<String, String>) -> AppResult<()> {
   let expanded_path = shellexpand::tilde(cache_dir);
   let mut cache_path = PathBuf::from(expanded_path.as_ref());
   cache_path.push("downloads");
@@ -33,6 +34,16 @@ pub fn unzip_downloaded_mods(cache_dir: &str) -> AppResult<()> {
     let file_path = entry.path();
 
     if file_path.extension().and_then(|ext| ext.to_str()) != Some("zip") {
+      continue;
+    }
+
+    let file_name = match file_path.file_name().and_then(|n| n.to_str()) {
+      Some(name) => name,
+      None => continue,
+    };
+
+    if !urls.contains_key(file_name) {
+      debug!("Skipping {} (not in resolved mod list)", file_name);
       continue;
     }
 
@@ -371,7 +382,12 @@ mod tests {
     let mut file = File::create(&zip_path).unwrap();
     file.write_all(b"This is not a valid zip file").unwrap();
 
-    let result = unzip_downloaded_mods(cache_dir);
+    let mut urls = HashMap::new();
+    urls.insert(
+      "Owner-ModName-1.0.0.zip".to_string(),
+      "http://example.com/fake".to_string(),
+    );
+    let result = unzip_downloaded_mods(cache_dir, &urls);
 
     assert!(result.is_err());
   }
@@ -395,7 +411,39 @@ mod tests {
     let mut non_zip_file = File::create(&non_zip_path).unwrap();
     non_zip_file.write_all(b"This is not a zip file").unwrap();
 
-    let _result = unzip_downloaded_mods(cache_dir);
+    let mut urls = HashMap::new();
+    urls.insert(
+      "Owner-ModName-1.0.0.zip".to_string(),
+      "http://example.com/fake".to_string(),
+    );
+    let _result = unzip_downloaded_mods(cache_dir, &urls);
+  }
+
+  #[test]
+  fn test_unzip_downloaded_mods_only_processes_resolved_version() {
+    let temp_dir = tempdir().unwrap();
+    let cache_dir = temp_dir.path().to_str().unwrap();
+    let downloads_dir = PathBuf::from(cache_dir).join("downloads");
+    fs::create_dir_all(&downloads_dir).unwrap();
+
+    let old_manifest = r#"{"version_number": "1.0.0", "name": "ModName", "description": ""}"#;
+    let new_manifest = r#"{"version_number": "2.0.0", "name": "ModName", "description": ""}"#;
+
+    create_test_zip(&downloads_dir, "Owner-ModName-1.0.0.zip", old_manifest);
+    create_test_zip(&downloads_dir, "Owner-ModName-2.0.0.zip", new_manifest);
+
+    let mut urls = HashMap::new();
+    urls.insert(
+      "Owner-ModName-2.0.0.zip".to_string(),
+      "http://example.com/fake".to_string(),
+    );
+
+    let result = unzip_downloaded_mods(cache_dir, &urls);
+    assert!(result.is_ok());
+
+    let extracted_manifest =
+      Manifest::from_file(downloads_dir.join("Owner-ModName").join("manifest.json")).unwrap();
+    assert_eq!(extracted_manifest.version_number, "2.0.0");
   }
 
   fn create_test_zip(dir: &Path, filename: &str, manifest_content: &str) -> PathBuf {
