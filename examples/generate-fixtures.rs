@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 use valheim_mod_manager::api;
-use valheim_mod_manager::package::Package;
+use valheim_mod_manager::package::{Package, PackageManifest, SerializableInternedManifest};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -25,25 +25,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
   fs::create_dir_all(&fixtures_dir)?;
 
-  println!("Generating v2 format fixture...");
-  let v2_data = bincode::serialize(&manifest)?;
-  let v2_compressed = zstd::encode_all(v2_data.as_slice(), 9)?;
-  let v2_path = fixtures_dir.join("api_manifest_v2.bin.zst");
-  fs::write(&v2_path, v2_compressed)?;
-  println!("  ✓ Written to benches/fixtures/api_manifest_v2.bin.zst");
-  println!("  ✓ Size: {} bytes", fs::metadata(&v2_path)?.len());
+  println!("Generating v3 format fixture (interned strings)...");
+  let serializable: SerializableInternedManifest = (&manifest).into();
+  let v3_data = bincode::serialize(&serializable)?;
+  let v3_compressed = zstd::encode_all(v3_data.as_slice(), 9)?;
+  let v3_path = fixtures_dir.join("api_manifest_v3.bin.zst");
+  fs::write(&v3_path, &v3_compressed)?;
+  println!("  ✓ Written to benches/fixtures/api_manifest_v3.bin.zst");
+  println!("  ✓ Size: {} bytes", fs::metadata(&v3_path)?.len());
   println!();
 
-  println!("Generating v1 format fixture (converting from v2)...");
+  println!("Generating v1 format fixture (converting from v3)...");
   let v1_packages: Vec<Package> = (0..manifest.len())
     .map(|idx| manifest.get_package_at(idx))
     .collect();
   let v1_data = bincode::serialize(&v1_packages)?;
   let v1_compressed = zstd::encode_all(v1_data.as_slice(), 3)?;
   let v1_path = fixtures_dir.join("api_manifest.bin.zst");
-  fs::write(&v1_path, v1_compressed)?;
+  fs::write(&v1_path, &v1_compressed)?;
   println!("  ✓ Written to benches/fixtures/api_manifest.bin.zst");
   println!("  ✓ Size: {} bytes", fs::metadata(&v1_path)?.len());
+  println!();
+
+  println!("Generating v2 format fixture (struct-of-arrays)...");
+  let v1_for_v2: Vec<Package> = bincode::deserialize(&v1_data)?;
+  let v2_manifest: PackageManifest = v1_for_v2.into();
+  let v2_data = bincode::serialize(&v2_manifest)?;
+  let v2_compressed = zstd::encode_all(v2_data.as_slice(), 3)?;
+  let v2_path = fixtures_dir.join("api_manifest_v2.bin.zst");
+  fs::write(&v2_path, &v2_compressed)?;
+  println!("  ✓ Written to benches/fixtures/api_manifest_v2.bin.zst");
+  println!("  ✓ Size: {} bytes", fs::metadata(&v2_path)?.len());
   println!();
 
   println!("✓ Fixtures generated successfully!");

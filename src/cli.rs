@@ -1,37 +1,47 @@
 use clap::{Args, Parser, Subcommand};
 
+/// Root command-line interface structure for the application.
+///
+/// This struct uses clap's derive macros to parse command-line arguments
+/// and route to the appropriate subcommand handler.
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 pub struct AppCli {
+  /// The subcommand to execute.
   #[command(subcommand)]
   pub command: Command,
 }
 
+/// Top-level commands available to the user.
 #[derive(Subcommand)]
 pub enum Command {
-  /// Update the mod manifest or installed mods
+  /// Update the mod manifest or installed mods.
   Update(CommandArgs),
-  /// Search for mods by name
+  /// Search for mods by name.
   Search(SearchArgs),
 }
 
+/// Arguments for the update command.
 #[derive(Args)]
 pub struct CommandArgs {
+  /// The specific update operation to perform.
   #[command(subcommand)]
   pub command: UpdatesCommand,
 }
 
+/// Arguments for the search command.
 #[derive(Args)]
 pub struct SearchArgs {
-  /// Search term to find mods by name
+  /// Search term to find mods by name.
   pub term: String,
 }
 
+/// Subcommands for the update operation.
 #[derive(Subcommand)]
 pub enum UpdatesCommand {
-  /// Update the mod manifest from the server
+  /// Update the mod manifest from the server.
   Manifest,
-  /// Update installed mods to their latest versions
+  /// Update installed mods to their latest versions.
   Mods,
 }
 

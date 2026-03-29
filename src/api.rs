@@ -1,5 +1,7 @@
 use crate::error::{AppError, AppResult};
-use crate::package::{Package, PackageManifest};
+use crate::package::{
+  InternedPackageManifest, Package, PackageManifest, SerializableInternedManifest,
+};
 
 use chrono::prelude::*;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -14,10 +16,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const API_URL: &str = "https://stacklands.thunderstore.io/c/valheim/api/v1/package/";
 const LAST_MODIFIED_FILENAME: &str = "last_modified";
-const API_MANIFEST_FILENAME: &str = "api_manifest_v2.bin.zst";
+const API_MANIFEST_FILENAME_V3: &str = "api_manifest_v3.bin.zst";
+const API_MANIFEST_FILENAME_V2: &str = "api_manifest_v2.bin.zst";
 const API_MANIFEST_FILENAME_V1: &str = "api_manifest.bin.zst";
 
 /// Returns the path to the last_modified file in the cache directory.
+///
+/// # Parameters
+///
+/// * `cache_dir` - The cache directory path (supports tilde expansion)
+///
+/// # Returns
+///
+/// The full path to the last_modified file
 fn last_modified_path(cache_dir: &str) -> PathBuf {
   let expanded_path = shellexpand::tilde(cache_dir);
   let mut path = PathBuf::from(expanded_path.as_ref());
@@ -25,15 +36,47 @@ fn last_modified_path(cache_dir: &str) -> PathBuf {
   path
 }
 
-/// Returns the path to the api_manifest file in the cache directory.
-fn api_manifest_path(cache_dir: &str) -> PathBuf {
+/// Returns the path to the v3 API manifest file in the cache directory.
+///
+/// # Parameters
+///
+/// * `cache_dir` - The cache directory path (supports tilde expansion)
+///
+/// # Returns
+///
+/// The full path to the v3 manifest file
+fn api_manifest_path_v3(cache_dir: &str) -> PathBuf {
   let expanded_path = shellexpand::tilde(cache_dir);
   let mut path = PathBuf::from(expanded_path.as_ref());
-  path.push(API_MANIFEST_FILENAME);
+  path.push(API_MANIFEST_FILENAME_V3);
   path
 }
 
-/// Returns the path to the old v1 api_manifest file in the cache directory.
+/// Returns the path to the v2 API manifest file in the cache directory.
+///
+/// # Parameters
+///
+/// * `cache_dir` - The cache directory path (supports tilde expansion)
+///
+/// # Returns
+///
+/// The full path to the v2 manifest file
+fn api_manifest_path_v2(cache_dir: &str) -> PathBuf {
+  let expanded_path = shellexpand::tilde(cache_dir);
+  let mut path = PathBuf::from(expanded_path.as_ref());
+  path.push(API_MANIFEST_FILENAME_V2);
+  path
+}
+
+/// Returns the path to the v1 API manifest file in the cache directory.
+///
+/// # Parameters
+///
+/// * `cache_dir` - The cache directory path (supports tilde expansion)
+///
+/// # Returns
+///
+/// The full path to the v1 manifest file
 fn api_manifest_path_v1(cache_dir: &str) -> PathBuf {
   let expanded_path = shellexpand::tilde(cache_dir);
   let mut path = PathBuf::from(expanded_path.as_ref());
@@ -54,7 +97,7 @@ fn api_manifest_path_v1(cache_dir: &str) -> PathBuf {
 ///
 /// # Returns
 ///
-/// A `PackageManifest` containing all available packages in SoA format.
+/// An `InternedPackageManifest` containing all available packages in SoA format with interned strings.
 ///
 /// # Errors
 ///
@@ -62,7 +105,10 @@ fn api_manifest_path_v1(cache_dir: &str) -> PathBuf {
 /// - Failed to check or retrieve last modified dates
 /// - Network request fails
 /// - Parsing fails
-pub async fn get_manifest(cache_dir: &str, api_url: Option<&str>) -> AppResult<PackageManifest> {
+pub async fn get_manifest(
+  cache_dir: &str,
+  api_url: Option<&str>,
+) -> AppResult<InternedPackageManifest> {
   let api_url = api_url.unwrap_or(API_URL);
   let last_modified = local_last_modified(cache_dir).await?;
   tracing::info!("Manifest last modified: {}", last_modified);
@@ -78,24 +124,47 @@ pub async fn get_manifest(cache_dir: &str, api_url: Option<&str>) -> AppResult<P
 
 /// Reads the cached API manifest from disk.
 ///
-/// Attempts to read the new v2 format first, falls back to v1 format if needed.
-/// When v1 format is detected, it automatically migrates to v2.
+/// Attempts to read formats in order: v3 (interned), v2 (SoA), v1 (`Vec<Package>`).
+/// When older formats are detected, they are automatically migrated to v3.
 ///
 /// # Returns
 ///
-/// The deserialized manifest as a PackageManifest.
+/// The deserialized manifest as an InternedPackageManifest.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - The file cannot be opened or read
 /// - The data cannot be decompressed or deserialized
-async fn get_manifest_from_disk(cache_dir: &str) -> AppResult<PackageManifest> {
-  let path_v2 = api_manifest_path(cache_dir);
+async fn get_manifest_from_disk(cache_dir: &str) -> AppResult<InternedPackageManifest> {
+  let path_v3 = api_manifest_path_v3(cache_dir);
+  let path_v2 = api_manifest_path_v2(cache_dir);
   let path_v1 = api_manifest_path_v1(cache_dir);
 
+  if path_v3.exists() {
+    tracing::debug!("Loading v3 manifest format");
+
+    let mut file = fs::File::open(&path_v3).await?;
+    let mut compressed_data = Vec::new();
+    file.read_to_end(&mut compressed_data).await?;
+
+    let decompressed_data = zstd::decode_all(compressed_data.as_slice())
+      .map_err(|e| AppError::Manifest(format!("Failed to decompress v3 manifest: {}", e)))?;
+
+    let serializable: SerializableInternedManifest = bincode::deserialize(&decompressed_data)
+      .map_err(|e| AppError::Manifest(format!("Failed to deserialize v3 manifest: {}", e)))?;
+
+    let manifest: InternedPackageManifest = serializable.into();
+
+    manifest
+      .validate()
+      .map_err(|e| AppError::Manifest(format!("V3 manifest validation failed: {}", e)))?;
+
+    return Ok(manifest);
+  }
+
   if path_v2.exists() {
-    tracing::debug!("Loading v2 manifest format");
+    tracing::info!("Found v2 manifest, migrating to v3 format");
 
     let mut file = fs::File::open(&path_v2).await?;
     let mut compressed_data = Vec::new();
@@ -104,69 +173,103 @@ async fn get_manifest_from_disk(cache_dir: &str) -> AppResult<PackageManifest> {
     let decompressed_data = zstd::decode_all(compressed_data.as_slice())
       .map_err(|e| AppError::Manifest(format!("Failed to decompress v2 manifest: {}", e)))?;
 
-    let manifest: PackageManifest = bincode::deserialize(&decompressed_data)
+    let v2_manifest: PackageManifest = bincode::deserialize(&decompressed_data)
       .map_err(|e| AppError::Manifest(format!("Failed to deserialize v2 manifest: {}", e)))?;
 
-    manifest
-      .validate()
-      .map_err(|e| AppError::Manifest(format!("V2 manifest validation failed: {}", e)))?;
+    let manifest: InternedPackageManifest = v2_manifest.into();
 
-    Ok(manifest)
-  } else {
-    if path_v1.exists() {
-      tracing::info!("Found v1 manifest, migrating to v2 format");
+    manifest.validate().map_err(|e| {
+      AppError::Manifest(format!(
+        "V3 manifest validation failed during migration: {}",
+        e
+      ))
+    })?;
 
-      let mut file = fs::File::open(&path_v1).await?;
-      let mut compressed_data = Vec::new();
-      file.read_to_end(&mut compressed_data).await?;
+    let serializable: SerializableInternedManifest = (&manifest).into();
+    let binary_data = bincode::serialize(&serializable)
+      .map_err(|e| AppError::Manifest(format!("Failed to serialize v3 manifest: {}", e)))?;
 
-      let decompressed_data = zstd::decode_all(compressed_data.as_slice())
-        .map_err(|e| AppError::Manifest(format!("Failed to decompress v1 manifest: {}", e)))?;
+    write_cache_to_disk(path_v3.clone(), &binary_data, true).await?;
 
-      let packages: Vec<Package> = bincode::deserialize(&decompressed_data)
-        .map_err(|e| AppError::Manifest(format!("Failed to deserialize v1 manifest: {}", e)))?;
+    match tokio::fs::metadata(&path_v3).await {
+      Ok(metadata) if metadata.len() > 0 => {
+        tracing::info!("V3 manifest written successfully, removing v2");
 
-      let manifest: PackageManifest = packages.into();
-
-      manifest.validate().map_err(|e| {
-        AppError::Manifest(format!(
-          "V2 manifest validation failed during migration: {}",
-          e
-        ))
-      })?;
-
-      let binary_data = bincode::serialize(&manifest)
-        .map_err(|e| AppError::Manifest(format!("Failed to serialize v2 manifest: {}", e)))?;
-
-      write_cache_to_disk(path_v2.clone(), &binary_data, true).await?;
-
-      match tokio::fs::metadata(&path_v2).await {
-        Ok(metadata) if metadata.len() > 0 => {
-          tracing::info!("V2 manifest written successfully, removing v1");
-
-          if let Err(e) = fs::remove_file(&path_v1).await {
-            tracing::warn!(
-              "Failed to remove old v1 manifest (keeping as backup): {}",
-              e
-            );
-          }
-        }
-        Ok(_) => {
-          tracing::error!("V2 manifest written but is empty, keeping v1 as backup");
-        }
-        Err(e) => {
-          tracing::error!(
-            "Failed to verify v2 manifest write: {}, keeping v1 as backup",
+        if let Err(e) = fs::remove_file(&path_v2).await {
+          tracing::warn!(
+            "Failed to remove old v2 manifest (keeping as backup): {}",
             e
           );
         }
       }
-
-      return Ok(manifest);
+      Ok(_) => {
+        tracing::error!("V3 manifest written but is empty, keeping v2 as backup");
+      }
+      Err(e) => {
+        tracing::error!(
+          "Failed to verify v3 manifest write: {}, keeping v2 as backup",
+          e
+        );
+      }
     }
 
-    Err(AppError::Manifest("No cached manifest found".to_string()))
+    return Ok(manifest);
   }
+
+  if path_v1.exists() {
+    tracing::info!("Found v1 manifest, migrating to v3 format");
+
+    let mut file = fs::File::open(&path_v1).await?;
+    let mut compressed_data = Vec::new();
+    file.read_to_end(&mut compressed_data).await?;
+
+    let decompressed_data = zstd::decode_all(compressed_data.as_slice())
+      .map_err(|e| AppError::Manifest(format!("Failed to decompress v1 manifest: {}", e)))?;
+
+    let packages: Vec<Package> = bincode::deserialize(&decompressed_data)
+      .map_err(|e| AppError::Manifest(format!("Failed to deserialize v1 manifest: {}", e)))?;
+
+    let manifest: InternedPackageManifest = packages.into();
+
+    manifest.validate().map_err(|e| {
+      AppError::Manifest(format!(
+        "V3 manifest validation failed during migration: {}",
+        e
+      ))
+    })?;
+
+    let serializable: SerializableInternedManifest = (&manifest).into();
+    let binary_data = bincode::serialize(&serializable)
+      .map_err(|e| AppError::Manifest(format!("Failed to serialize v3 manifest: {}", e)))?;
+
+    write_cache_to_disk(path_v3.clone(), &binary_data, true).await?;
+
+    match tokio::fs::metadata(&path_v3).await {
+      Ok(metadata) if metadata.len() > 0 => {
+        tracing::info!("V3 manifest written successfully, removing v1");
+
+        if let Err(e) = fs::remove_file(&path_v1).await {
+          tracing::warn!(
+            "Failed to remove old v1 manifest (keeping as backup): {}",
+            e
+          );
+        }
+      }
+      Ok(_) => {
+        tracing::error!("V3 manifest written but is empty, keeping v1 as backup");
+      }
+      Err(e) => {
+        tracing::error!(
+          "Failed to verify v3 manifest write: {}, keeping v1 as backup",
+          e
+        );
+      }
+    }
+
+    return Ok(manifest);
+  }
+
+  Err(AppError::Manifest("No cached manifest found".to_string()))
 }
 
 /// Downloads the manifest from the API server and filters out unnecessary fields.
@@ -229,7 +332,7 @@ async fn get_manifest_from_network(
 ///
 /// This function retrieves the manifest from the API server and saves both
 /// the manifest content and the last modified date to disk.
-/// The manifest is converted to the SoA format before caching.
+/// The manifest is converted to the interned V3 format before caching.
 ///
 /// # Parameters
 ///
@@ -238,7 +341,7 @@ async fn get_manifest_from_network(
 ///
 /// # Returns
 ///
-/// The manifest data as PackageManifest.
+/// The manifest data as InternedPackageManifest.
 ///
 /// # Errors
 ///
@@ -248,7 +351,7 @@ async fn get_manifest_from_network(
 async fn get_manifest_from_network_and_cache(
   cache_dir: &str,
   api_url: &str,
-) -> AppResult<PackageManifest> {
+) -> AppResult<InternedPackageManifest> {
   let results = get_manifest_from_network(api_url).await?;
   let packages = results.0;
   let last_modified_from_network = results.1;
@@ -260,11 +363,12 @@ async fn get_manifest_from_network_and_cache(
   )
   .await?;
 
-  let manifest: PackageManifest = packages.into();
-  let binary_data = bincode::serialize(&manifest)
+  let manifest: InternedPackageManifest = packages.into();
+  let serializable: SerializableInternedManifest = (&manifest).into();
+  let binary_data = bincode::serialize(&serializable)
     .map_err(|e| AppError::Manifest(format!("Failed to serialize manifest: {}", e)))?;
 
-  write_cache_to_disk(api_manifest_path(cache_dir), &binary_data, true).await?;
+  write_cache_to_disk(api_manifest_path_v3(cache_dir), &binary_data, true).await?;
 
   Ok(manifest)
 }
@@ -338,13 +442,19 @@ async fn network_last_modified(api_url: &str) -> AppResult<DateTime<FixedOffset>
   Ok(last_modified_date)
 }
 
-/// Checks if the cached manifest file exists.
+/// Checks for the existence of any version of the cached manifest file (v1, v2, or v3).
+///
+/// # Parameters
+///
+/// * `cache_dir` - The cache directory path
 ///
 /// # Returns
 ///
-/// `true` if the api_manifest file exists, `false` otherwise.
+/// `true` if any api_manifest file exists, `false` otherwise.
 fn api_manifest_file_exists(cache_dir: &str) -> bool {
-  api_manifest_path(cache_dir).exists()
+  api_manifest_path_v3(cache_dir).exists()
+    || api_manifest_path_v2(cache_dir).exists()
+    || api_manifest_path_v1(cache_dir).exists()
 }
 
 /// Writes data to a cache file on disk.
@@ -584,7 +694,7 @@ mod tests {
     assert!(!api_manifest_file_exists(temp_dir_str));
 
     let mut path = PathBuf::from(temp_dir_str);
-    path.push(API_MANIFEST_FILENAME);
+    path.push(API_MANIFEST_FILENAME_V3);
     let _ = File::create(path).unwrap();
 
     assert!(api_manifest_file_exists(temp_dir_str));
@@ -597,7 +707,7 @@ mod tests {
     let expected_path = Path::new(&home_dir).join("some_test_dir");
 
     let last_modified = last_modified_path(home_path);
-    let api_manifest = api_manifest_path(home_path);
+    let api_manifest = api_manifest_path_v3(home_path);
 
     assert_eq!(last_modified.parent().unwrap(), expected_path);
     assert_eq!(api_manifest.parent().unwrap(), expected_path);
@@ -746,11 +856,12 @@ mod tests {
     };
 
     let packages = vec![package];
-    let manifest: PackageManifest = packages.into();
-    let binary_data = bincode::serialize(&manifest).unwrap();
+    let interned_manifest: InternedPackageManifest = packages.into();
+    let serializable: SerializableInternedManifest = (&interned_manifest).into();
+    let binary_data = bincode::serialize(&serializable).unwrap();
     let compressed_data = zstd::encode_all(binary_data.as_slice(), 9).unwrap();
     let mut path = PathBuf::from(temp_dir_str);
-    path.push(API_MANIFEST_FILENAME);
+    path.push(API_MANIFEST_FILENAME_V3);
     let mut file = File::create(path).unwrap();
     file.write_all(&compressed_data).unwrap();
 
@@ -758,7 +869,10 @@ mod tests {
     let manifest = rt.block_on(get_manifest_from_disk(temp_dir_str)).unwrap();
 
     assert_eq!(manifest.len(), 1);
-    assert_eq!(manifest.full_names[0], Some("Owner-ModA".to_string()));
+    assert_eq!(
+      manifest.resolve_full_name_at(0),
+      Some("Owner-ModA".to_string())
+    );
   }
 
   #[test]
@@ -767,7 +881,7 @@ mod tests {
     let temp_dir_str = temp_dir.path().to_str().unwrap();
 
     let mut path = PathBuf::from(temp_dir_str);
-    path.push(API_MANIFEST_FILENAME);
+    path.push(API_MANIFEST_FILENAME_V3);
     let mut file = File::create(path).unwrap();
     file
       .write_all(b"This is not valid compressed data")
@@ -888,14 +1002,15 @@ mod tests {
     };
 
     let packages = vec![package];
-    let manifest: PackageManifest = packages.into();
-    let binary_data = bincode::serialize(&manifest).unwrap();
+    let interned_manifest: InternedPackageManifest = packages.into();
+    let serializable: SerializableInternedManifest = (&interned_manifest).into();
+    let binary_data = bincode::serialize(&serializable).unwrap();
     let compressed_data = zstd::encode_all(binary_data.as_slice(), 9).unwrap();
 
     std::fs::create_dir_all(PathBuf::from(temp_dir_str)).unwrap();
 
     let mut manifest_path = PathBuf::from(temp_dir_str);
-    manifest_path.push(API_MANIFEST_FILENAME);
+    manifest_path.push(API_MANIFEST_FILENAME_V3);
     let mut file = File::create(manifest_path).unwrap();
     file.write_all(&compressed_data).unwrap();
 
@@ -945,7 +1060,7 @@ mod tests {
     let mut file = File::create(&v1_path).unwrap();
     file.write_all(&compressed_data).unwrap();
 
-    let v2_path = PathBuf::from(temp_dir_str).join(API_MANIFEST_FILENAME);
+    let v2_path = PathBuf::from(temp_dir_str).join(API_MANIFEST_FILENAME_V3);
     assert!(!v2_path.exists());
     assert!(v1_path.exists());
 
@@ -955,9 +1070,12 @@ mod tests {
     assert!(result.is_ok());
     let manifest = result.unwrap();
     assert_eq!(manifest.len(), 1);
-    assert_eq!(manifest.full_names[0], Some("OldOwner-OldMod".to_string()));
+    assert_eq!(
+      manifest.resolve_full_name_at(0),
+      Some("OldOwner-OldMod".to_string())
+    );
 
-    assert!(v2_path.exists(), "v2 manifest should be created");
+    assert!(v2_path.exists(), "v3 manifest should be created");
     assert!(!v1_path.exists(), "v1 manifest should be removed");
   }
 
@@ -1019,10 +1137,13 @@ mod tests {
     assert!(result.is_ok());
     if let Ok(manifest) = result {
       assert_eq!(manifest.len(), 1);
-      assert_eq!(manifest.full_names[0], Some("Owner-ModA".to_string()));
+      assert_eq!(
+        manifest.resolve_full_name_at(0),
+        Some("Owner-ModA".to_string())
+      );
 
       assert!(last_modified_path(temp_dir_str).exists());
-      assert!(api_manifest_path(temp_dir_str).exists());
+      assert!(api_manifest_path_v3(temp_dir_str).exists());
 
       let last_mod_content = std::fs::read_to_string(last_modified_path(temp_dir_str)).unwrap();
       assert!(last_mod_content.contains("21 Feb 2024 15:30:45"));

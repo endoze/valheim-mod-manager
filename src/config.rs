@@ -6,11 +6,19 @@ use std::{fs::OpenOptions, path::Path};
 
 use crate::error::{AppError, AppResult};
 
+/// Application configuration loaded from vmm_config.toml.
+///
+/// This structure defines all user-configurable settings for the Valheim Mod Manager,
+/// including which mods to manage, logging preferences, and file system paths.
 #[derive(Serialize, Deserialize)]
 pub struct AppConfig {
+  /// List of mods to install and manage, specified as "Owner-ModName" strings.
   pub mod_list: Vec<String>,
+  /// Logging level (e.g., "error", "warn", "info", "debug", "trace").
   pub log_level: String,
+  /// Directory path for caching downloaded manifests and mod files.
   pub cache_dir: String,
+  /// Optional directory path where mods should be installed.
   pub install_dir: Option<String>,
 }
 
@@ -25,15 +33,26 @@ impl Default for AppConfig {
   }
 }
 
+/// Global application configuration instance.
+///
+/// This static is lazily initialized on first access by reading from vmm_config.toml
+/// or creating a new config file with default values if none exists.
+///
+/// # Panics
+///
+/// Panics if the configuration file cannot be read or parsed.
 #[cfg(not(tarpaulin_include))]
 pub static APP_CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
   get_config().unwrap_or_else(|err| panic!("An error has occurred getting the config: '{err}'"))
 });
 
-/// Returns a new ConfigData.
+/// Loads application configuration from vmm_config.toml.
 ///
-/// If a config.toml didn't already exist
-/// a new one is created and set with default values.
+/// If a config.toml doesn't already exist, a new one is created with default values.
+///
+/// # Returns
+///
+/// The loaded configuration, or an error if reading/parsing fails.
 #[cfg(not(tarpaulin_include))]
 fn get_config() -> Result<AppConfig, ConfigError> {
   let default_config_data = AppConfig::default();
@@ -54,7 +73,16 @@ fn get_config() -> Result<AppConfig, ConfigError> {
     .try_deserialize()
 }
 
-/// Creates a new config file with their default values.
+/// Creates a new configuration file with default values.
+///
+/// # Parameters
+///
+/// * `config_path` - Path where the config file should be created
+/// * `default_config_data` - Default configuration values to serialize
+///
+/// # Returns
+///
+/// `Ok(())` on success, or an error if file creation or serialization fails.
 fn create_missing_config_file(
   config_path: &Path,
   default_config_data: &AppConfig,
