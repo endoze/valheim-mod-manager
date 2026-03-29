@@ -1,7 +1,6 @@
 use config::{Config, ConfigError, File};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::sync::LazyLock;
 use std::{fs::OpenOptions, path::Path};
 
 use crate::error::{AppError, AppResult};
@@ -16,8 +15,6 @@ pub struct AppConfig {
   pub mod_list: Vec<String>,
   /// Logging level (e.g., "error", "warn", "info", "debug", "trace").
   pub log_level: String,
-  /// Directory path for caching downloaded manifests and mod files.
-  pub cache_dir: String,
   /// Optional directory path where mods should be installed.
   pub install_dir: Option<String>,
 }
@@ -27,50 +24,61 @@ impl Default for AppConfig {
     Self {
       mod_list: vec![],
       log_level: "error".into(),
-      cache_dir: "~/.config/vmm".into(),
       install_dir: None,
     }
   }
 }
 
-/// Global application configuration instance.
+/// The XDG config directory for vmm (~/.config/vmm).
 ///
-/// This static is lazily initialized on first access by reading from vmm_config.toml
-/// or creating a new config file with default values if none exists.
-///
-/// # Panics
-///
-/// Panics if the configuration file cannot be read or parsed.
+/// Used as the cache and data directory for downloaded manifests and mod files.
 #[cfg(not(tarpaulin_include))]
-pub static APP_CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
-  get_config().unwrap_or_else(|err| panic!("An error has occurred getting the config: '{err}'"))
+pub static APP_CACHE_DIR: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+  xdg::BaseDirectories::with_prefix("vmm")
+    .expect("Failed to initialize XDG base directories")
+    .get_config_home()
+    .to_string_lossy()
+    .into_owned()
 });
 
-/// Loads application configuration from vmm_config.toml.
+/// Loads application configuration.
 ///
-/// If a config.toml doesn't already exist, a new one is created with default values.
-///
-/// # Returns
-///
-/// The loaded configuration, or an error if reading/parsing fails.
-#[cfg(not(tarpaulin_include))]
-fn get_config() -> Result<AppConfig, ConfigError> {
+/// If `config_override` is provided, loads only from that path.
+/// Otherwise, looks for a local `vmm_config.toml` first, then falls back to
+/// the XDG config location (`~/.config/vmm/vmm_config.toml`). If neither
+/// exists, a default config is created at the XDG location.
+pub fn get_config(config_override: Option<&Path>) -> Result<AppConfig, ConfigError> {
   let default_config_data = AppConfig::default();
-  let config_path_name = "vmm_config.toml";
-  let config_path = Path::new(config_path_name);
 
-  if !config_path.exists() {
-    let _ = create_missing_config_file(config_path, &default_config_data);
+  let mut builder = Config::builder()
+    .set_default("mod_list", default_config_data.mod_list.clone())?
+    .set_default("log_level", default_config_data.log_level.clone())?
+    .set_default("install_dir", default_config_data.install_dir.clone())?;
+
+  if let Some(path) = config_override {
+    builder = builder.add_source(File::with_name(path.to_str().unwrap_or_default()));
+  } else {
+    let local_path = Path::new("vmm_config.toml");
+    let xdg_dirs =
+      xdg::BaseDirectories::with_prefix("vmm").expect("Failed to initialize XDG base directories");
+    let global_path = xdg_dirs.get_config_file("vmm_config.toml");
+
+    if !local_path.exists() && !global_path.exists() {
+      if let Ok(path) = xdg_dirs.place_config_file("vmm_config.toml") {
+        let _ = create_missing_config_file(&path, &default_config_data);
+      }
+    }
+
+    if global_path.exists() {
+      builder = builder.add_source(File::with_name(global_path.to_str().unwrap_or_default()));
+    }
+
+    if local_path.exists() {
+      builder = builder.add_source(File::with_name("vmm_config.toml"));
+    }
   }
 
-  Config::builder()
-    .set_default("mod_list", default_config_data.mod_list)?
-    .set_default("log_level", default_config_data.log_level)?
-    .set_default("cache_dir", default_config_data.cache_dir)?
-    .set_default("install_dir", default_config_data.install_dir)?
-    .add_source(File::with_name(config_path_name))
-    .build()?
-    .try_deserialize()
+  builder.build()?.try_deserialize()
 }
 
 /// Creates a new configuration file with default values.
@@ -137,16 +145,9 @@ mod tests {
 
   #[test]
   fn test_custom_config_values() {
-    let dir = tempdir().unwrap();
-
     let custom_config = AppConfig {
       mod_list: vec!["Owner1-ModA".to_string(), "Owner2-ModB".to_string()],
       log_level: "debug".to_string(),
-      cache_dir: dir
-        .path()
-        .to_str()
-        .expect("Should get string represenation of temporary directory path")
-        .to_string(),
       install_dir: Some("/path/to/install/directory".to_string()),
     };
 
@@ -167,5 +168,23 @@ mod tests {
     assert_eq!(parsed.mod_list.len(), 2);
     assert_eq!(parsed.mod_list[0], "Owner1-ModA");
     assert_eq!(parsed.mod_list[1], "Owner2-ModB");
+  }
+
+  #[test]
+  fn test_get_config_with_override() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("override_config.toml");
+
+    let custom_config = AppConfig {
+      mod_list: vec!["Owner1-ModA".to_string()],
+      log_level: "debug".to_string(),
+      install_dir: None,
+    };
+
+    create_missing_config_file(&config_path, &custom_config).unwrap();
+
+    let loaded = get_config(Some(&config_path)).unwrap();
+    assert_eq!(loaded.log_level, "debug");
+    assert_eq!(loaded.mod_list, vec!["Owner1-ModA"]);
   }
 }
