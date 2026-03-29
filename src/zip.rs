@@ -6,7 +6,6 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
-use crate::config::APP_CONFIG;
 use crate::error::{AppError, AppResult};
 use crate::manifest::Manifest;
 
@@ -21,11 +20,12 @@ use crate::manifest::Manifest;
 /// # Returns
 ///
 /// `Ok(())` if all files are processed successfully, or an error if reading the directory fails.
-pub fn unzip_downloaded_mods(cache_dir: &str, urls: &HashMap<String, String>) -> AppResult<()> {
-  let expanded_path = shellexpand::tilde(cache_dir);
-  let mut cache_path = PathBuf::from(expanded_path.as_ref());
-  cache_path.push("downloads");
-  let downloads_dir = cache_path;
+pub fn unzip_downloaded_mods(
+  cache_dir: &str,
+  urls: &HashMap<String, String>,
+  install_dir: Option<&str>,
+) -> AppResult<()> {
+  let downloads_dir = PathBuf::from(cache_dir).join("downloads");
   let entries = fs::read_dir(&downloads_dir)?;
 
   info!("Processing mod files for extraction");
@@ -47,7 +47,7 @@ pub fn unzip_downloaded_mods(cache_dir: &str, urls: &HashMap<String, String>) ->
       continue;
     }
 
-    process_zip_file(&downloads_dir, &file_path)?;
+    process_zip_file(&downloads_dir, &file_path, install_dir)?;
   }
 
   info!("Finished processing all mod files");
@@ -170,7 +170,11 @@ fn calculate_crc32(data: &[u8]) -> u32 {
 /// - The zip file cannot be opened
 /// - Extraction fails
 /// - Copying to install directory fails
-fn process_zip_file(downloads_dir: &Path, file_path: &PathBuf) -> AppResult<()> {
+fn process_zip_file(
+  downloads_dir: &Path,
+  file_path: &PathBuf,
+  install_dir: Option<&str>,
+) -> AppResult<()> {
   let file_name = match file_path.file_name().and_then(|n| n.to_str()) {
     Some(name) => name,
     None => {
@@ -215,7 +219,7 @@ fn process_zip_file(downloads_dir: &Path, file_path: &PathBuf) -> AppResult<()> 
     unzip(file, &mod_dir)?;
   }
 
-  if let Some(install_dir) = &APP_CONFIG.install_dir {
+  if let Some(install_dir) = install_dir {
     copy_mod_to_install_dir(&mod_dir, install_dir, &mod_name)?;
   }
 
@@ -387,7 +391,7 @@ mod tests {
       "Owner-ModName-1.0.0.zip".to_string(),
       "http://example.com/fake".to_string(),
     );
-    let result = unzip_downloaded_mods(cache_dir, &urls);
+    let result = unzip_downloaded_mods(cache_dir, &urls, None);
 
     assert!(result.is_err());
   }
@@ -416,7 +420,7 @@ mod tests {
       "Owner-ModName-1.0.0.zip".to_string(),
       "http://example.com/fake".to_string(),
     );
-    let _result = unzip_downloaded_mods(cache_dir, &urls);
+    let _result = unzip_downloaded_mods(cache_dir, &urls, None);
   }
 
   #[test]
@@ -438,7 +442,7 @@ mod tests {
       "http://example.com/fake".to_string(),
     );
 
-    let result = unzip_downloaded_mods(cache_dir, &urls);
+    let result = unzip_downloaded_mods(cache_dir, &urls, None);
     assert!(result.is_ok());
 
     let extracted_manifest =
@@ -519,7 +523,7 @@ mod tests {
     let mut file = File::create(&invalid_zip_path).unwrap();
     file.write_all(b"This is not a valid zip file").unwrap();
 
-    let result = process_zip_file(&downloads_dir, &invalid_zip_path);
+    let result = process_zip_file(&downloads_dir, &invalid_zip_path, None);
 
     assert!(result.is_err());
     if let Err(err) = result {
@@ -540,7 +544,7 @@ mod tests {
 
     let nonexistent_path = PathBuf::from("/nonexistent/file/that/does/not/exist");
 
-    let result = process_zip_file(&downloads_dir, &nonexistent_path);
+    let result = process_zip_file(&downloads_dir, &nonexistent_path, None);
 
     assert!(result.is_err());
   }

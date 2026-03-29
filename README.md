@@ -31,11 +31,19 @@ cargo install --path .
 
 ## Configuration
 
-The first time you run `vmm`, it will create a default configuration file at `vmm_config.toml` in your current directory. You can edit this file to customize:
+`vmm` looks for configuration in the following order:
+
+1. A `vmm_config.toml` in the current directory (local config)
+2. `~/.config/vmm/vmm_config.toml` (global XDG config)
+
+If neither exists, a default config is created at the global location on first run.
+
+You can also specify a config file directly with the `--config` flag, which bypasses the above lookup entirely.
+
+The config file supports the following settings:
 
 - `mod_list`: List of mods to install (in the format `"Owner-ModName"`)
 - `log_level`: Logging verbosity (`error`, `warn`, `info`, `debug`, `trace`)
-- `cache_dir`: Directory to store cached mod information (default: `~/.config/vmm`)
 - `install_dir`: Optional directory where unzipped mods will be copied (e.g., your Valheim mods folder)
 
 Example configuration:
@@ -43,7 +51,6 @@ Example configuration:
 ```toml
 mod_list = ["denikson-BepInExPack_Valheim", "ValheimModding-Jotunn"]
 log_level = "info"
-cache_dir = "~/.config/vmm"
 install_dir = "~/some/path/to/Valheim/BepInEx/plugins"
 ```
 
@@ -65,6 +72,34 @@ Downloads all mods in your configuration, including their dependencies:
 vmm update mods
 ```
 
+### List Mods
+
+Lists all mods from your configuration including resolved dependencies:
+
+```bash
+vmm list
+```
+
+By default outputs one mod per line. Use `--format json` for structured output:
+
+```bash
+vmm list --format json
+```
+
+**Text output (default):**
+```
+  denikson-BepInExPack_Valheim 5.4.2202
+  ValheimModding-Jotunn 2.28.0
+```
+
+**JSON output:**
+```json
+[
+  {"full_name": "denikson-BepInExPack_Valheim", "version": "5.4.2202"},
+  {"full_name": "ValheimModding-Jotunn", "version": "2.28.0"}
+]
+```
+
 ### Search for Mods
 
 Searches available mods by name:
@@ -74,6 +109,18 @@ vmm search <term>
 ```
 
 This performs a case-insensitive search for mods containing the specified term in their name, displaying matching mods with their owner, name, version, and description.
+
+## Global Options
+
+### `--config <path>`
+
+Override the config file location, bypassing the local/global lookup:
+
+```bash
+vmm --config /path/to/my/vmm_config.toml update mods
+```
+
+Downloads and cached data always go to `~/.config/vmm/` regardless of which config file is used. Respects `$XDG_CONFIG_HOME` if set.
 
 ## How It Works
 
@@ -86,20 +133,18 @@ This performs a case-insensitive search for mods containing the specified term i
 
 ## Directory Structure
 
-- `~/.config/vmm/` (or custom `cache_dir` setting in config): Cache directory for mod information
-- `~/.config/vmm/downloads/` (or custom `cache_dir/downloads`): Location for downloaded mod archives and extracted files
+- `~/.config/vmm/`: Config and cache directory (respects `$XDG_CONFIG_HOME`)
+- `~/.config/vmm/downloads/`: Downloaded mod archives and extracted files
 
-## Advanced Features
+## Troubleshooting
 
-### Troubleshooting
+If you encounter issues, increase log verbosity in your config:
 
-If you encounter issues:
+```toml
+log_level = "debug"
+```
 
-1. Increase log verbosity in your config:
-   ```toml
-   log_level = "debug"
-   ```
-2. Run the command again to see more detailed output
+Then run the command again to see more detailed output.
 
 ## License
 

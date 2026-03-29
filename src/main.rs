@@ -1,5 +1,6 @@
 mod api;
 mod cli;
+mod commands;
 mod config;
 mod error;
 mod intern;
@@ -11,113 +12,38 @@ mod zip;
 use crate::{cli::AppCli, error::AppResult};
 use clap::Parser;
 use cli::{Command, UpdatesCommand};
-use config::APP_CONFIG;
-use package::DependencyGraph;
+use config::{APP_CACHE_DIR, get_config};
 
-/// The main entry point for the Valheim Mod Manager application.
-///
-/// This function initializes the logging system, fetches the manifest of available
-/// mods, and downloads a predefined set of mods and their dependencies.
-///
-/// # Returns
-///
-/// `Ok(())` if the program runs successfully, or an error if something fails.
 #[tokio::main]
 #[cfg(not(tarpaulin_include))]
 async fn main() -> AppResult<()> {
-  logs::setup_logging();
   let app = AppCli::parse();
+  let config = get_config(app.config.as_deref())
+    .unwrap_or_else(|err| panic!("An error has occurred getting the config: '{err}'"));
+
+  logs::setup_logging(&config.log_level);
   tracing::info!("Starting valheim mod manager");
+
+  let cache_dir: &str = &APP_CACHE_DIR;
 
   match &app.command {
     Command::Update(subcmd) => match subcmd.command {
-      UpdatesCommand::Manifest => {
-        tracing::info!("Checking for manifest updates");
-        let _ = api::get_manifest(&APP_CONFIG.cache_dir, None).await?;
-      }
+      UpdatesCommand::Manifest => commands::update::run_manifest(cache_dir, None).await?,
       UpdatesCommand::Mods => {
-        let manifest = api::get_manifest(&APP_CONFIG.cache_dir, None).await?;
-        let packages = APP_CONFIG.mod_list.clone();
-
-        tracing::info!("Building dependency graph for mods");
-
-        let dg = DependencyGraph::new(packages);
-        let urls = dg.resolve_interned(&manifest);
-
-        tracing::info!("Done building dependency graph, proceeding to download mods if necessary");
-
-        api::download_files(urls.clone(), &APP_CONFIG.cache_dir).await?;
-
-        zip::unzip_downloaded_mods(&APP_CONFIG.cache_dir, &urls)?;
+        commands::update::run_mods(
+          cache_dir,
+          config.mod_list.clone(),
+          config.install_dir.as_deref(),
+          None,
+        )
+        .await?
       }
     },
+    Command::List(list_args) => {
+      commands::list::run(cache_dir, config.mod_list.clone(), &list_args.format, None).await?
+    }
     Command::Search(search_args) => {
-      let manifest = api::get_manifest(&APP_CONFIG.cache_dir, None).await?;
-      let search_term = search_args.term.to_lowercase();
-
-      let search_results: Vec<usize> = (0..manifest.len())
-        .filter(|&idx| {
-          if let Some(name) = manifest.resolve_name_at(idx) {
-            if name.to_lowercase().contains(&search_term) {
-              return true;
-            }
-          }
-
-          if let Some(full_name) = manifest.resolve_full_name_at(idx) {
-            if full_name.to_lowercase().contains(&search_term) {
-              return true;
-            }
-          }
-
-          false
-        })
-        .collect();
-
-      if search_results.is_empty() {
-        println!("No mods found matching '{}'", search_args.term);
-      } else {
-        println!(
-          "Found {} mods matching '{}':\n",
-          search_results.len(),
-          search_args.term
-        );
-
-        for idx in search_results {
-          let version = manifest
-            .get_latest_version_at(idx)
-            .and_then(|ver_idx| {
-              intern::resolve_option(
-                &manifest.interner,
-                manifest.versions.version_numbers[ver_idx],
-              )
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
-
-          let description = manifest
-            .get_latest_version_at(idx)
-            .and_then(|ver_idx| {
-              intern::resolve_option(&manifest.interner, manifest.versions.descriptions[ver_idx])
-            })
-            .unwrap_or_default();
-
-          let name = manifest
-            .resolve_name_at(idx)
-            .or_else(|| manifest.resolve_full_name_at(idx))
-            .unwrap_or_else(|| "Unknown".to_string());
-
-          let owner = manifest
-            .resolve_owner_at(idx)
-            .unwrap_or_else(|| "Unknown".to_string());
-
-          println!("{}-{} ({})", owner, name, version);
-
-          if !description.is_empty() {
-            println!("  {}", description);
-          }
-
-          println!();
-        }
-      }
+      commands::search::run(cache_dir, &search_args.term, None).await?
     }
   }
 

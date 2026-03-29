@@ -1,4 +1,5 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use std::path::PathBuf;
 
 /// Root command-line interface structure for the application.
 ///
@@ -7,6 +8,9 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 pub struct AppCli {
+  /// Path to a config file, overriding the default XDG location.
+  #[arg(long, global = true)]
+  pub config: Option<PathBuf>,
   /// The subcommand to execute.
   #[command(subcommand)]
   pub command: Command,
@@ -19,6 +23,25 @@ pub enum Command {
   Update(CommandArgs),
   /// Search for mods by name.
   Search(SearchArgs),
+  /// List all mods from config including resolved dependencies.
+  List(ListArgs),
+}
+
+/// Arguments for the list command.
+#[derive(Args)]
+pub struct ListArgs {
+  /// Output format.
+  #[arg(long, value_enum, default_value_t = ListFormat::Text)]
+  pub format: ListFormat,
+}
+
+/// Output format for the list command.
+#[derive(Clone, ValueEnum)]
+pub enum ListFormat {
+  /// Plain text, one mod per line.
+  Text,
+  /// JSON array.
+  Json,
 }
 
 /// Arguments for the update command.
@@ -121,5 +144,28 @@ mod tests {
         .to_string()
         .contains("Update installed mods to their latest versions")
     );
+  }
+
+  #[test]
+  fn test_command_list() {
+    let app = AppCli::command();
+    let list_command = app.find_subcommand("list").unwrap();
+
+    assert_eq!(list_command.get_name(), "list");
+    assert!(list_command.get_about().is_some());
+    assert!(
+      list_command
+        .get_about()
+        .unwrap()
+        .to_string()
+        .contains("List all mods from config including resolved dependencies")
+    );
+
+    let list_args = list_command.get_arguments().collect::<Vec<_>>();
+    let format_arg = list_args
+      .iter()
+      .find(|a| a.get_id().as_str() == "format")
+      .unwrap();
+    assert!(format_arg.get_default_values().iter().any(|v| v == "text"));
   }
 }

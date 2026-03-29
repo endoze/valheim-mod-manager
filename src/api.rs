@@ -24,64 +24,52 @@ const API_MANIFEST_FILENAME_V1: &str = "api_manifest.bin.zst";
 ///
 /// # Parameters
 ///
-/// * `cache_dir` - The cache directory path (supports tilde expansion)
+/// * `cache_dir` - The cache directory path
 ///
 /// # Returns
 ///
 /// The full path to the last_modified file
 fn last_modified_path(cache_dir: &str) -> PathBuf {
-  let expanded_path = shellexpand::tilde(cache_dir);
-  let mut path = PathBuf::from(expanded_path.as_ref());
-  path.push(LAST_MODIFIED_FILENAME);
-  path
+  PathBuf::from(cache_dir).join(LAST_MODIFIED_FILENAME)
 }
 
 /// Returns the path to the v3 API manifest file in the cache directory.
 ///
 /// # Parameters
 ///
-/// * `cache_dir` - The cache directory path (supports tilde expansion)
+/// * `cache_dir` - The cache directory path
 ///
 /// # Returns
 ///
 /// The full path to the v3 manifest file
 fn api_manifest_path_v3(cache_dir: &str) -> PathBuf {
-  let expanded_path = shellexpand::tilde(cache_dir);
-  let mut path = PathBuf::from(expanded_path.as_ref());
-  path.push(API_MANIFEST_FILENAME_V3);
-  path
+  PathBuf::from(cache_dir).join(API_MANIFEST_FILENAME_V3)
 }
 
 /// Returns the path to the v2 API manifest file in the cache directory.
 ///
 /// # Parameters
 ///
-/// * `cache_dir` - The cache directory path (supports tilde expansion)
+/// * `cache_dir` - The cache directory path
 ///
 /// # Returns
 ///
 /// The full path to the v2 manifest file
 fn api_manifest_path_v2(cache_dir: &str) -> PathBuf {
-  let expanded_path = shellexpand::tilde(cache_dir);
-  let mut path = PathBuf::from(expanded_path.as_ref());
-  path.push(API_MANIFEST_FILENAME_V2);
-  path
+  PathBuf::from(cache_dir).join(API_MANIFEST_FILENAME_V2)
 }
 
 /// Returns the path to the v1 API manifest file in the cache directory.
 ///
 /// # Parameters
 ///
-/// * `cache_dir` - The cache directory path (supports tilde expansion)
+/// * `cache_dir` - The cache directory path
 ///
 /// # Returns
 ///
 /// The full path to the v1 manifest file
 fn api_manifest_path_v1(cache_dir: &str) -> PathBuf {
-  let expanded_path = shellexpand::tilde(cache_dir);
-  let mut path = PathBuf::from(expanded_path.as_ref());
-  path.push(API_MANIFEST_FILENAME_V1);
-  path
+  PathBuf::from(cache_dir).join(API_MANIFEST_FILENAME_V1)
 }
 
 /// Retrieves the manifest of available packages.
@@ -614,8 +602,7 @@ async fn download_file(
   progress_style: ProgressStyle,
   cache_dir: &str,
 ) -> AppResult<()> {
-  let expanded_path = shellexpand::tilde(cache_dir);
-  let mut downloads_directory = PathBuf::from(expanded_path.as_ref());
+  let mut downloads_directory = PathBuf::from(cache_dir);
   downloads_directory.push("downloads");
   let mut file_path = downloads_directory.clone();
   file_path.push(filename);
@@ -678,8 +665,7 @@ mod tests {
     let temp_dir = tempdir().unwrap();
     let cache_dir = temp_dir.path().to_str().unwrap();
 
-    let expanded_path = shellexpand::tilde(cache_dir);
-    let mut downloads_directory = PathBuf::from(expanded_path.as_ref());
+    let mut downloads_directory = PathBuf::from(cache_dir);
     downloads_directory.push("downloads");
 
     let expected_directory = PathBuf::from(cache_dir).join("downloads");
@@ -701,16 +687,20 @@ mod tests {
   }
 
   #[test]
-  fn test_path_with_tilde() {
-    let home_path = "~/some_test_dir";
-    let home_dir = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
-    let expected_path = Path::new(&home_dir).join("some_test_dir");
+  fn test_path_construction() {
+    let cache_dir = "/some/cache/dir";
 
-    let last_modified = last_modified_path(home_path);
-    let api_manifest = api_manifest_path_v3(home_path);
+    let last_modified = last_modified_path(cache_dir);
+    let api_manifest = api_manifest_path_v3(cache_dir);
 
-    assert_eq!(last_modified.parent().unwrap(), expected_path);
-    assert_eq!(api_manifest.parent().unwrap(), expected_path);
+    assert_eq!(
+      last_modified,
+      Path::new(cache_dir).join(LAST_MODIFIED_FILENAME)
+    );
+    assert_eq!(
+      api_manifest,
+      Path::new(cache_dir).join(API_MANIFEST_FILENAME_V3)
+    );
   }
 
   #[test]
