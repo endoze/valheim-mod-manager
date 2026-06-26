@@ -1,42 +1,55 @@
-use crate::{api, cli::ListFormat, error::AppResult, package::DependencyGraph};
+use crate::cli::ListFormat;
+use crate::error::AppResult;
+use crate::target::Target;
+use thunderstore_engine::profile::modlist::ProfileMod;
 
-pub async fn run(
-  cache_dir: &str,
-  mod_list: Vec<String>,
-  format: &ListFormat,
-  api_url: Option<&str>,
-) -> AppResult<()> {
-  let manifest = api::get_manifest(cache_dir, api_url).await?;
-  let dg = DependencyGraph::new(mod_list);
-  let urls = dg.resolve_interned(&manifest);
+/// Renders the installed mods, sorted by identifier.
+///
+/// Pure so the output can be asserted without capturing stdout.
+pub fn render(mods: &[ProfileMod], format: &ListFormat) -> AppResult<String> {
+  let mut sorted: Vec<&ProfileMod> = mods.iter().collect();
 
-  let mut entries: Vec<&String> = urls.keys().collect();
-  entries.sort();
+  sorted.sort_by(|a, b| a.name.cmp(&b.name));
 
-  match format {
+  let rendered = match format {
     ListFormat::Text => {
-      for entry in entries {
-        let name = entry.strip_suffix(".zip").unwrap_or(entry);
-        if let Some((full_name, version)) = name.rsplit_once('-') {
-          println!("{} {}", full_name, version);
-        }
+      let mut out = String::new();
+
+      for entry in sorted {
+        let state = if entry.enabled { "" } else { " (disabled)" };
+
+        out.push_str(&format!(
+          "{} {}{}\n",
+          entry.name, entry.version_number, state
+        ));
       }
+
+      out
     }
     ListFormat::Json => {
-      let json_entries: Vec<serde_json::Value> = entries
+      let entries: Vec<serde_json::Value> = sorted
         .iter()
-        .filter_map(|entry| {
-          let name = entry.strip_suffix(".zip").unwrap_or(entry);
-          let (full_name, version) = name.rsplit_once('-')?;
-          Some(serde_json::json!({
-            "full_name": full_name,
-            "version": version,
-          }))
+        .map(|entry| {
+          serde_json::json!({
+            "full_name": entry.name,
+            "version": entry.version_number.to_string(),
+            "enabled": entry.enabled,
+          })
         })
         .collect();
-      println!("{}", serde_json::to_string_pretty(&json_entries)?);
+
+      serde_json::to_string_pretty(&entries)?
     }
-  }
+  };
+
+  Ok(rendered)
+}
+
+/// Prints the mods recorded in the target's `mods.yml`.
+pub fn run(target: &Target, format: &ListFormat) -> AppResult<()> {
+  let mods = super::read_modlist(target)?;
+
+  print!("{}", render(&mods, format)?);
 
   Ok(())
 }
@@ -44,92 +57,117 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use mockito::Server;
-  use tempfile::tempdir;
+  use crate::test_support::Fixture;
+  use thunderstore_engine::ecosystem::Ecosystem;
+  use thunderstore_engine::profile::modlist;
   use tokio::runtime::Runtime;
 
-  fn test_manifest_json() -> &'static str {
-    r#"[{
-      "name": "ModA",
-      "full_name": "Owner-ModA",
-      "owner": "Owner",
-      "package_url": "https://example.com/mods/ModA",
-      "date_created": "2024-01-01T12:00:00Z",
-      "date_updated": "2024-01-02T12:00:00Z",
-      "uuid4": "test-uuid",
-      "rating_score": 5,
-      "is_pinned": false,
-      "is_deprecated": false,
-      "has_nsfw_content": false,
-      "categories": ["category1"],
-      "versions": [{
-        "name": "ModA",
-        "full_name": "Owner-ModA",
-        "description": "Test description",
-        "icon": "icon.png",
-        "version_number": "1.0.0",
-        "dependencies": [],
-        "download_url": "https://example.com/mods/ModA/download",
-        "downloads": 100,
-        "date_created": "2024-01-01T12:00:00Z",
-        "website_url": "https://example.com",
-        "is_active": true,
-        "uuid4": "test-version-uuid",
-        "file_size": 1024
-      }]
-    }]"#
-  }
+  /// Installs two mods and disables one, returning the recorded list.
+  fn installed_mods(fixture: &Fixture, target: &crate::target::Target) -> Vec<modlist::ProfileMod> {
+    let eco = Ecosystem::bundled();
 
-  fn setup_mock_server(server: &mut mockito::ServerGuard) -> String {
-    let last_modified = "Wed, 21 Feb 2024 15:30:45 GMT";
-    server
-      .mock("GET", "/c/valheim/api/v1/package/")
-      .with_status(200)
-      .with_header("Content-Type", "application/json")
-      .with_header("Last-Modified", last_modified)
-      .with_body(test_manifest_json())
-      .create();
-    format!("{}/c/valheim/api/v1/package/", server.url())
+    Runtime::new()
+      .unwrap()
+      .block_on(crate::commands::install::run(
+        &fixture.client,
+        &eco,
+        target,
+        &["Owner-ModB".to_string(), "Owner-ModA".to_string()],
+      ))
+      .unwrap();
+
+    thunderstore_engine::profile::set_enabled_in(
+      &target.dir,
+      &eco,
+      crate::target::GAME,
+      "Owner-ModB",
+      false,
+    )
+    .unwrap();
+
+    modlist::read(&target.dir).unwrap()
   }
 
   #[test]
-  fn test_run_list_text_format_empty_mod_list() {
-    let mut server = Server::new();
-    let api_url = setup_mock_server(&mut server);
-    let temp_dir = tempdir().unwrap();
-    let cache_dir = temp_dir.path().to_str().unwrap();
+  fn text_output_is_sorted_and_marks_disabled_mods() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let mods = installed_mods(&fixture, &target);
 
-    let rt = Runtime::new().unwrap();
-    let result = rt.block_on(run(cache_dir, vec![], &ListFormat::Text, Some(&api_url)));
+    let rendered = render(&mods, &ListFormat::Text).unwrap();
 
-    assert!(result.is_ok());
+    assert_eq!(rendered, "Owner-ModA 1.0.0\nOwner-ModB 1.0.0 (disabled)\n");
   }
 
   #[test]
-  fn test_run_list_text_format_with_mods() {
-    let mut server = Server::new();
-    let api_url = setup_mock_server(&mut server);
-    let temp_dir = tempdir().unwrap();
-    let cache_dir = temp_dir.path().to_str().unwrap();
-    let mod_list = vec!["Owner-ModA".to_string()];
+  fn json_output_carries_version_and_enabled() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let mods = installed_mods(&fixture, &target);
 
-    let rt = Runtime::new().unwrap();
-    let result = rt.block_on(run(cache_dir, mod_list, &ListFormat::Text, Some(&api_url)));
+    let rendered = render(&mods, &ListFormat::Json).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
 
-    assert!(result.is_ok());
+    assert_eq!(parsed[0]["full_name"], "Owner-ModA");
+    assert_eq!(parsed[0]["version"], "1.0.0");
+    assert_eq!(parsed[0]["enabled"], true);
+    assert_eq!(parsed[1]["full_name"], "Owner-ModB");
+    assert_eq!(parsed[1]["enabled"], false);
   }
 
   #[test]
-  fn test_run_list_json_format_with_mods() {
-    let mut server = Server::new();
-    let api_url = setup_mock_server(&mut server);
-    let temp_dir = tempdir().unwrap();
-    let cache_dir = temp_dir.path().to_str().unwrap();
-    let mod_list = vec!["Owner-ModA".to_string()];
+  fn nothing_installed_renders_empty() {
+    assert_eq!(render(&[], &ListFormat::Text).unwrap(), "");
 
-    let rt = Runtime::new().unwrap();
-    let result = rt.block_on(run(cache_dir, mod_list, &ListFormat::Json, Some(&api_url)));
+    let json = render(&[], &ListFormat::Json).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-    assert!(result.is_ok());
+    assert_eq!(parsed.as_array().unwrap().len(), 0);
+  }
+
+  #[test]
+  fn run_reads_the_target_and_succeeds() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+
+    installed_mods(&fixture, &target);
+
+    assert!(run(&target, &ListFormat::Text).is_ok());
+  }
+
+  #[test]
+  fn a_profile_lists_its_own_mods_not_the_game_dirs() {
+    let fixture = Fixture::new();
+    let profile = fixture.profile_target("experiment");
+    let eco = Ecosystem::bundled();
+
+    // An unparseable `mods.yml` in the game directory: `run` reading the wrong
+    // target would surface that parse error instead of the profile's list, which
+    // is what makes the `is_ok()` below a real check rather than a smoke test.
+    std::fs::write(fixture.game_dir.path().join("mods.yml"), "not: [valid").unwrap();
+
+    Runtime::new()
+      .unwrap()
+      .block_on(crate::commands::install::run(
+        &fixture.client,
+        &eco,
+        &profile,
+        &["Owner-ModB".to_string()],
+      ))
+      .unwrap();
+
+    let rendered = render(&modlist::read(&profile.dir).unwrap(), &ListFormat::Text).unwrap();
+
+    assert_eq!(rendered, "Owner-ModB 1.0.0\n");
+    assert!(modlist::read(fixture.game_dir.path()).is_err());
+    assert!(run(&profile, &ListFormat::Text).is_ok());
+    // The profile's install stayed out of the game directory.
+    assert!(
+      !fixture
+        .game_dir
+        .path()
+        .join("BepInEx/plugins/Owner-ModB")
+        .exists()
+    );
   }
 }
