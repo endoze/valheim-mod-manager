@@ -2,3 +2,4 @@
 vmm_config.toml
 /coverage
 benches/fixtures/*.bin.zst
+/docs/superpowers
