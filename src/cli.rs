@@ -32,7 +32,7 @@ pub enum Command {
   /// List installed mods and their versions.
   List(ListArgs),
   /// Install one or more mods and their dependencies.
-  Install(ModsArgs),
+  Install(InstallArgs),
   /// Uninstall one or more mods.
   Uninstall(UninstallArgs),
   /// Enable an installed mod, or every installed mod with `--all`.
@@ -52,12 +52,17 @@ pub enum Command {
   Import(ImportArgs),
 }
 
-/// Arguments for commands taking one or more mod identifiers.
+/// Arguments for the install command.
 #[derive(Args)]
-pub struct ModsArgs {
+pub struct InstallArgs {
   /// One or more `Owner-ModName` identifiers.
   #[arg(required = true)]
   pub mods: Vec<String>,
+  /// Reinstall the named mods even when that version is already installed,
+  /// removing their existing files first. Dependencies are not forced; they are
+  /// still reinstalled if outdated or missing.
+  #[arg(long)]
+  pub force: bool,
 }
 
 /// Arguments for the uninstall command.
@@ -143,7 +148,16 @@ pub enum UpdatesCommand {
   /// Update the mod manifest from the server.
   Manifest,
   /// Update installed mods to their latest versions.
-  Mods,
+  Mods(UpdateModsArgs),
+}
+
+/// Arguments for the `update mods` command.
+#[derive(Args)]
+pub struct UpdateModsArgs {
+  /// Reinstall every recorded mod even when it is already at its latest
+  /// version, removing its existing files first. Disabled mods stay disabled.
+  #[arg(long)]
+  pub force: bool,
 }
 
 /// Arguments for the profile command.
@@ -359,6 +373,66 @@ mod tests {
     match forced.command {
       Command::Uninstall(args) => assert!(args.force),
       _ => panic!("expected the uninstall subcommand"),
+    }
+  }
+
+  #[test]
+  fn install_takes_mods_and_an_opt_in_force_flag() {
+    let app = AppCli::command();
+    let install = app.find_subcommand("install").unwrap();
+
+    let force = install
+      .get_arguments()
+      .find(|arg| arg.get_id().as_str() == "force")
+      .expect("install should offer --force");
+
+    assert!(force.get_help().is_some());
+    // Long only, matching `uninstall --force`.
+    assert!(force.get_short().is_none());
+
+    // Opt-in: absent means a mod already at the recorded version is skipped.
+    let parsed = AppCli::try_parse_from(["vmm", "install", "Owner-Mod"]).unwrap();
+
+    match parsed.command {
+      Command::Install(args) => {
+        assert_eq!(args.mods, vec!["Owner-Mod".to_string()]);
+        assert!(!args.force);
+      }
+      _ => panic!("expected the install subcommand"),
+    }
+
+    let forced = AppCli::try_parse_from(["vmm", "install", "--force", "Owner-Mod"]).unwrap();
+
+    match forced.command {
+      Command::Install(args) => {
+        assert_eq!(args.mods, vec!["Owner-Mod".to_string()]);
+        assert!(args.force);
+      }
+      _ => panic!("expected the install subcommand"),
+    }
+  }
+
+  #[test]
+  fn update_mods_takes_an_opt_in_force_flag() {
+    let parsed = AppCli::try_parse_from(["vmm", "update", "mods"]).unwrap();
+
+    // Opt-in: absent means a mod already at its latest version is skipped.
+    match parsed.command {
+      Command::Update(sub) => match sub.command {
+        UpdatesCommand::Mods(args) => assert!(!args.force),
+        UpdatesCommand::Manifest => panic!("expected the mods subcommand"),
+      },
+      _ => panic!("expected the update subcommand"),
+    }
+
+    let forced = AppCli::try_parse_from(["vmm", "update", "mods", "--force"]).unwrap();
+
+    match forced.command {
+      Command::Update(sub) => match sub.command {
+        UpdatesCommand::Mods(args) => assert!(args.force),
+        UpdatesCommand::Manifest => panic!("expected the mods subcommand"),
+      },
+      _ => panic!("expected the update subcommand"),
     }
   }
 

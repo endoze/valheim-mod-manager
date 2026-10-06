@@ -52,19 +52,65 @@ pub fn describe_count(count: usize) -> String {
   }
 }
 
-/// Prints each installed identifier with the version recorded in `mods.yml`, so
-/// what is reported is what was actually written.
-pub fn report_installed(target: &Target, installed: &[String]) -> AppResult<()> {
-  let mods = read_modlist(target)?;
-
-  for name in installed {
-    match modlist::find(&mods, name) {
-      Some(entry) => println!("installed {} {}", entry.name, entry.version_number),
-      None => println!("installed {name}"),
-    }
+/// Names `name` with the version `mods` records for it, so what is reported is
+/// what was actually written. A name the record does not carry is still named,
+/// just without a version, rather than dropped from the output.
+pub fn describe_recorded(mods: &[ProfileMod], name: &str) -> String {
+  match modlist::find(mods, name) {
+    Some(entry) => format!("{} {}", entry.name, entry.version_number),
+    None => name.to_string(),
   }
+}
 
-  Ok(())
+/// Prints each identifier after `verb`, with the version recorded in `mods`.
+///
+/// `mods` is the record read once after the operation, not re-read here, so a
+/// command reporting several lists parses `mods.yml` only once and cannot fail
+/// partway through its report.
+pub fn report_recorded(mods: &[ProfileMod], verb: &str, names: &[String]) {
+  for name in names {
+    println!("{verb} {}", describe_recorded(mods, name));
+  }
+}
+
+/// Prints each identifier an install left alone because its recorded version is
+/// already the one that would be installed, quoting that version the same way
+/// [`report_recorded`] does.
+pub fn report_unchanged(mods: &[ProfileMod], unchanged: &[String]) {
+  for name in unchanged {
+    println!("{} is already installed", describe_recorded(mods, name));
+  }
+}
+
+/// Prints `enabled X` or `disabled X` for each of `names` whose recorded state
+/// differs between `before` and `after`. See [`state_changes`].
+pub fn report_state_changes(before: &[ProfileMod], after: &[ProfileMod], names: &[String]) {
+  for line in state_changes(before, after, names) {
+    println!("{line}");
+  }
+}
+
+/// The lines [`report_state_changes`] prints, pulled out so they are testable
+/// without capturing stdout.
+///
+/// A mod skipped as current can still have its enabled state changed by the
+/// operation, which would otherwise read as nothing having changed. A name
+/// either record does not carry is left out: it was newly installed, or its
+/// state cannot be known.
+fn state_changes(before: &[ProfileMod], after: &[ProfileMod], names: &[String]) -> Vec<String> {
+  names
+    .iter()
+    .filter_map(|name| {
+      let was = modlist::find(before, name)?;
+      let now = modlist::find(after, name)?;
+
+      match (was.enabled, now.enabled) {
+        (false, true) => Some(format!("enabled {name}")),
+        (true, false) => Some(format!("disabled {name}")),
+        _ => None,
+      }
+    })
+    .collect()
 }
 
 /// Turns a batch's per-item failures into a single error, after its successes
@@ -113,17 +159,73 @@ mod tests {
   use crate::test_support::Fixture;
 
   #[test]
-  fn an_installed_name_the_record_does_not_carry_is_still_reported() {
+  fn a_recorded_name_is_described_with_the_version_the_record_carries() {
     let fixture = Fixture::new();
     let target = fixture.target();
 
+    tokio::runtime::Runtime::new()
+      .unwrap()
+      .block_on(install::run(
+        &fixture.client,
+        &thunderstore_engine::ecosystem::Ecosystem::bundled(),
+        &target,
+        &["Owner-ModA".to_string()],
+        false,
+      ))
+      .unwrap();
+
+    let mods = read_modlist(&target).unwrap();
+
+    assert_eq!(describe_recorded(&mods, "Owner-ModA"), "Owner-ModA 1.0.0");
+  }
+
+  #[test]
+  fn a_name_the_record_does_not_carry_is_still_described() {
     // The version comes out of `mods.yml` so what is reported is what was
     // actually written. An identifier the record does not name therefore has no
     // version to quote, and the fallback exists so it is still reported rather
     // than silently dropped from a batch's output: `install_batch` records a
-    // success before this reads the file back, so a name that went missing in
+    // success before the record is read back, so a name that went missing in
     // between is precisely the case worth seeing.
-    report_installed(&target, &["Owner-ModA".to_string()]).unwrap();
+    assert_eq!(describe_recorded(&[], "Owner-ModA"), "Owner-ModA");
+  }
+
+  #[test]
+  fn state_changes_names_each_flip_and_nothing_else() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let eco = thunderstore_engine::ecosystem::Ecosystem::bundled();
+    let names = ["Owner-ModA".to_string(), "Owner-ModB".to_string()];
+
+    tokio::runtime::Runtime::new()
+      .unwrap()
+      .block_on(install::run(&fixture.client, &eco, &target, &names, false))
+      .unwrap();
+
+    let before = read_modlist(&target).unwrap();
+
+    thunderstore_engine::profile::set_enabled_in(
+      &target.dir,
+      &eco,
+      crate::target::GAME,
+      "Owner-ModA",
+      false,
+    )
+    .unwrap();
+
+    let after = read_modlist(&target).unwrap();
+
+    assert_eq!(
+      state_changes(&before, &after, &names),
+      vec!["disabled Owner-ModA".to_string()]
+    );
+    assert_eq!(
+      state_changes(&after, &before, &names),
+      vec!["enabled Owner-ModA".to_string()]
+    );
+    // A name missing from the earlier record was newly installed, which is not
+    // a change of state worth reporting.
+    assert!(state_changes(&[], &after, &names).is_empty());
   }
 
   /// A batch that failed `failed` items and completed `succeeded` ones.

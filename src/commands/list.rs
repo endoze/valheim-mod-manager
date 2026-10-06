@@ -73,6 +73,7 @@ mod tests {
         &eco,
         target,
         &["Owner-ModB".to_string(), "Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -153,6 +154,7 @@ mod tests {
         &eco,
         &profile,
         &["Owner-ModB".to_string()],
+        false,
       ))
       .unwrap();
 

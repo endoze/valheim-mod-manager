@@ -184,6 +184,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -216,6 +217,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -261,6 +263,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string(), "Owner-ModB".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -393,6 +396,7 @@ mod tests {
           "Owner-ModA".to_string(),
           "denikson-BepInExPack_Valheim".to_string(),
         ],
+        false,
       ))
       .unwrap();
 
@@ -422,6 +426,7 @@ mod tests {
         &eco,
         &target,
         &["denikson-BepInExPack_Valheim".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -464,6 +469,7 @@ mod tests {
         &eco,
         &target,
         &["denikson-BepInExPack_Valheim".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -483,6 +489,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string(), "Owner-ModB".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -521,6 +528,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string(), "Owner-ModB".to_string()],
+        false,
       ))
       .unwrap();
 

@@ -239,13 +239,15 @@ async fn run() -> AppResult<()> {
     // Matched on the subcommand rather than assumed: `Manifest` returned above,
     // but a third `UpdatesCommand` variant must not silently reinstall every
     // recorded mod, so the compiler is made to demand an arm for it.
-    Command::Update(sub) => match sub.command {
-      UpdatesCommand::Mods => commands::update::run_mods(&client, &ecosystem, &target).await?,
+    Command::Update(sub) => match &sub.command {
+      UpdatesCommand::Mods(args) => {
+        commands::update::run_mods(&client, &ecosystem, &target, args.force).await?
+      }
       UpdatesCommand::Manifest => unreachable!("dispatched before target resolution"),
     },
     Command::List(list_args) => commands::list::run(&target, &list_args.format)?,
     Command::Install(args) => {
-      commands::install::run(&client, &ecosystem, &target, &args.mods).await?
+      commands::install::run(&client, &ecosystem, &target, &args.mods, args.force).await?
     }
     Command::Uninstall(args) => match args.all {
       true => commands::uninstall::run_all(
