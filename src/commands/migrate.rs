@@ -84,12 +84,15 @@ pub fn hint_if_unmigrated(target: &Target, config: &AppConfig) {
 
 /// Adopts the deprecated `mod_list` as the target's `mods.yml`.
 ///
-/// Installing rewrites the files the old folder-based installer placed, so this
-/// is safe to run over an existing install, including retrying after a prior
-/// partial failure: an already-recorded entry is simply reinstalled, which is
-/// cheap since its archive is already downloaded and already extracted in the
-/// shared cache. The adoption itself, and the rule that its delisted sweep runs
-/// only once every `mod_list` entry is adopted, are [`portability::adopt_names_in`]'s;
+/// Installing an unrecorded entry rewrites the files the old folder-based
+/// installer placed, so this is safe to run over an existing install, including
+/// retrying after a prior partial failure: an entry already recorded at its
+/// latest version with its files in place is skipped, and one that is outdated
+/// or missing files is reinstalled. A skipped entry's folder is left as it is,
+/// so any stray files the old installer left there stay until
+/// `vmm update mods --force` reinstalls every recorded mod from a clean folder.
+/// The adoption itself, and the rule that its delisted sweep runs only once
+/// every `mod_list` entry is adopted, are [`portability::adopt_names_in`]'s;
 /// this only reports what it did and turns a leftover `remaining` list into a
 /// resumable error.
 pub async fn run(
@@ -150,7 +153,13 @@ pub async fn run(
   )
   .await?;
 
-  super::report_installed(target, &outcome.adopted)?;
+  // The adoption has already happened, so an unreadable record must not abort
+  // the report before `remaining` and `failed` are turned into their errors;
+  // each name is then printed without its version.
+  let recorded = thunderstore_engine::profile::modlist::read(&target.dir).unwrap_or_default();
+
+  super::report_recorded(&recorded, "installed", &outcome.adopted);
+  super::report_unchanged(&recorded, &outcome.unchanged);
 
   for dir in &outcome.swept {
     println!("swept stale folder {}", dir.display());
@@ -158,6 +167,13 @@ pub async fn run(
 
   if !outcome.remaining.is_empty() {
     return Err(unadopted_error(&outcome.remaining, &outcome.failed));
+  }
+
+  // Every entry is recorded, but one already recorded can still have failed to
+  // reinstall, such as a failed upgrade. The engine lists it only in `failed`,
+  // so without this the migration would report success over it.
+  if !outcome.failed.is_empty() {
+    return Err(failed_reinstall_error(target, &outcome.failed));
   }
 
   println!(
@@ -203,6 +219,41 @@ fn unadopted_error(
     "migration stopped part way through.",
     detail,
     &["vmm migrate"],
+  )
+}
+
+/// Builds the error `run` returns when every `mod_list` entry ended up recorded
+/// but some already-recorded entries failed to reinstall.
+///
+/// The migration itself is finished, so this says `mod_list` can go, and points
+/// at `vmm update mods` rather than `vmm migrate` for the retry: with nothing
+/// left to adopt, a second `vmm migrate` refuses to run. Not `vmm install`
+/// either, which would name the mods and so re-enable any the user disabled.
+/// A failed reinstall leaves its mod outdated or missing files, so the update
+/// retries exactly these and skips everything already current.
+fn failed_reinstall_error(
+  target: &Target,
+  failed: &[(String, thunderstore_engine::error::Error)],
+) -> AppError {
+  let named: Vec<String> = failed
+    .iter()
+    .map(|(name, error)| format!("{name}: {error}"))
+    .collect();
+
+  AppError::advice(
+    format!(
+      "{} could not be reinstalled during the migration.",
+      super::describe_count(failed.len())
+    ),
+    format!(
+      "Every `mod_list` entry is now recorded in {}, so the migration is \
+       finished and you can delete `mod_list` from your config. These are \
+       still recorded, but their files may be incomplete until they are \
+       installed again:\n\n  {}",
+      target.mods_yml().display(),
+      named.join("\n  ")
+    ),
+    &["vmm update mods"],
   )
 }
 
@@ -318,6 +369,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -415,6 +467,60 @@ mod tests {
   }
 
   #[test]
+  fn migrate_reports_a_recorded_entry_that_failed_to_reinstall() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let eco = Ecosystem::bundled();
+    let runtime = Runtime::new().unwrap();
+
+    runtime
+      .block_on(crate::commands::install::run(
+        &fixture.client,
+        &eco,
+        &target,
+        &["Owner-ModA".to_string()],
+        false,
+      ))
+      .unwrap();
+
+    // Owner-ModA stays recorded, but its folder is replaced by a plain file, so
+    // its files are not in place, the install is attempted, and it cannot
+    // recreate the folder. Owner-ModB is unrecorded, so a migration still runs.
+    let folder = target.dir.join("BepInEx/plugins/Owner-ModA");
+
+    std::fs::remove_dir_all(&folder).unwrap();
+    std::fs::write(&folder, b"in the way").unwrap();
+
+    let message = runtime
+      .block_on(run(
+        &fixture.client,
+        &eco,
+        &target,
+        &config_with(&["Owner-ModA", "Owner-ModB"]),
+      ))
+      .unwrap_err()
+      .to_string();
+
+    // Both entries are recorded, so this is not the resumable "stopped part
+    // way through" error, but the failure must not pass as a success either.
+    assert!(
+      message.contains("1 mod could not be reinstalled"),
+      "got: {message}"
+    );
+    assert!(message.contains("Owner-ModA:"), "got: {message}");
+    // Not `vmm install`, which names the mod and so would re-enable it if the
+    // user had disabled it.
+    assert!(message.contains("vmm update mods"), "got: {message}");
+    assert!(!message.contains("vmm install"), "got: {message}");
+    assert!(!message.contains("part way through"), "got: {message}");
+
+    let mods = modlist::read(&target.dir).unwrap();
+
+    assert!(modlist::find(&mods, "Owner-ModA").is_some());
+    assert!(modlist::find(&mods, "Owner-ModB").is_some());
+  }
+
+  #[test]
   fn migrate_is_resumable_after_a_partial_failure() {
     let fixture = Fixture::new();
     let target = fixture.target();
@@ -468,6 +574,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string(), "Owner-ModB".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -519,6 +626,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 

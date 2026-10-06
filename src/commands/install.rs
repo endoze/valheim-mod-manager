@@ -2,7 +2,7 @@ use crate::error::AppResult;
 use crate::target::{GAME, Target};
 use thunderstore_engine::client::ThunderstoreClient;
 use thunderstore_engine::ecosystem::Ecosystem;
-use thunderstore_engine::profile;
+use thunderstore_engine::profile::{self, modlist};
 
 /// Installs each mod and its full dependency closure into the target.
 ///
@@ -10,24 +10,36 @@ use thunderstore_engine::profile;
 /// `target.base`, installs into `target.dir`, and upserts `mods.yml` plus any
 /// `_state` tracker. Nothing here duplicates that pipeline.
 ///
+/// A mod whose recorded version is the one that would be installed, with its
+/// files still in place, is skipped and reported as already installed. `force`
+/// reinstalls the named mods regardless, removing their existing files first; it
+/// never reaches their dependencies, which are still skipped when current.
+///
 /// `mods` is passed as both the desired set and the explicit set, so a mod
 /// named on the command line is left enabled: asking for it by name is a
-/// request to have it active. Only an incidentally reinstalled dependency keeps
-/// its disabled state, which `install_batch` restores after the whole batch,
-/// even when the batch failed partway.
+/// request to have it active. One that was disabled is reported as enabled.
+/// Only an incidentally reinstalled dependency keeps its disabled state, which
+/// `install_batch` restores after the whole batch, even when the batch failed
+/// partway.
 pub async fn run(
   client: &ThunderstoreClient,
   eco: &Ecosystem,
   target: &Target,
   mods: &[String],
+  force: bool,
 ) -> AppResult<()> {
-  // Read the record first, not for its own sake: the planner below reads the
-  // same file immediately after, but reading it here first means an unreadable
-  // mods.yml speaks in vmm's advice voice instead of the engine's raw error
-  // surfacing from inside the planner.
-  super::read_modlist(target)?;
+  // Read the record first: the planner below reads the same file immediately
+  // after, but reading it here first means an unreadable mods.yml speaks in
+  // vmm's advice voice instead of the engine's raw error surfacing from inside
+  // the planner. It is also the before side of the enabled-state report.
+  let before = super::read_modlist(target)?;
 
-  let batch = profile::plan_install_batch(&target.dir, mods, mods)?;
+  // `InstallBatch` is non-exhaustive, so the planned batch is adjusted in place
+  // rather than rebuilt with struct-update syntax.
+  let mut batch = profile::plan_install_batch(&target.dir, mods, mods)?;
+
+  batch.force = force;
+
   let index = client.get_manifest().await?;
 
   let outcome = profile::install_batch(
@@ -42,7 +54,17 @@ pub async fn run(
   )
   .await?;
 
-  super::report_installed(target, &outcome.succeeded)?;
+  // Read once for every line below. The install has already happened, so an
+  // unreadable record must not abort the report before `report_batch_failures`
+  // gets to say what failed; each name is then printed without its version.
+  let recorded = modlist::read(&target.dir).unwrap_or_default();
+
+  super::report_recorded(&recorded, "installed", &outcome.succeeded);
+  super::report_unchanged(&recorded, &outcome.unchanged);
+
+  // A named mod that was disabled is enabled by the install, even when it was
+  // skipped as current, which would otherwise read as nothing having changed.
+  super::report_state_changes(&before, &recorded, &batch.enable_requested);
 
   for full_name in &batch.protect_disabled {
     if outcome.succeeded.contains(full_name) {
@@ -74,6 +96,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -104,6 +127,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -132,6 +156,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModC".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -168,6 +193,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -180,19 +206,28 @@ mod tests {
     )
     .unwrap();
 
-    // Naming a mod explicitly is a request to have it active, so the reapply
-    // pass must skip it.
+    // A reinstall clears the mod's folder first, so this surviving shows the
+    // mod was skipped rather than reinstalled.
+    let stray = target.dir.join("BepInEx/plugins/Owner-ModA/stray.json");
+
+    std::fs::write(&stray, b"left behind").unwrap();
+
+    // Naming a mod explicitly is a request to have it active. It is already at
+    // the recorded version, so it is skipped rather than reinstalled, and is
+    // enabled anyway: `run` reports that so the change is not silent.
     runtime
       .block_on(run(
         &fixture.client,
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
     let mods = modlist::read(&target.dir).unwrap();
 
+    assert!(stray.exists(), "a current mod should be skipped");
     assert!(modlist::find(&mods, "Owner-ModA").unwrap().enabled);
     assert!(
       target
@@ -215,6 +250,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -239,6 +275,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModC".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -261,6 +298,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -295,6 +333,7 @@ mod tests {
         &eco,
         &target,
         &["denikson-BepInExPack_Valheim".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -330,6 +369,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap_err()
       .to_string();
@@ -351,8 +391,101 @@ mod tests {
       &eco,
       &target,
       &["Owner-Nonexistent".to_string()],
+      false,
     ));
 
     assert!(result.is_err());
+  }
+
+  #[test]
+  fn reinstalling_a_recorded_version_without_force_leaves_it_unchanged() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let eco = Ecosystem::bundled();
+    let runtime = Runtime::new().unwrap();
+    let mods = ["Owner-ModA".to_string()];
+
+    runtime
+      .block_on(run(&fixture.client, &eco, &target, &mods, false))
+      .unwrap();
+
+    let folder = target.dir.join("BepInEx/plugins/Owner-ModA");
+    let plugin = folder.join("ModA.dll");
+    let stray = folder.join("stray.json");
+
+    std::fs::write(&plugin, b"edited").unwrap();
+    std::fs::write(&stray, b"left behind").unwrap();
+
+    runtime
+      .block_on(run(&fixture.client, &eco, &target, &mods, false))
+      .unwrap();
+
+    // Already at the recorded version, so nothing is reinstalled and nothing on
+    // disk is touched, including files the install never placed.
+    assert_eq!(std::fs::read(&plugin).unwrap(), b"edited");
+    assert!(stray.exists());
+  }
+
+  #[test]
+  fn force_reinstalls_a_recorded_version_from_a_clean_folder() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let eco = Ecosystem::bundled();
+    let runtime = Runtime::new().unwrap();
+    let mods = ["Owner-ModA".to_string()];
+
+    runtime
+      .block_on(run(&fixture.client, &eco, &target, &mods, false))
+      .unwrap();
+
+    let folder = target.dir.join("BepInEx/plugins/Owner-ModA");
+    let plugin = folder.join("ModA.dll");
+    // The shape issue #23 left behind: a file that belongs in a subfolder,
+    // installed flat into the mod's namespaced folder.
+    let stray = folder.join("german.json");
+
+    std::fs::write(&plugin, b"edited").unwrap();
+    std::fs::write(&stray, b"flattened").unwrap();
+
+    runtime
+      .block_on(run(&fixture.client, &eco, &target, &mods, true))
+      .unwrap();
+
+    assert!(!stray.exists(), "--force should clear the old folder first");
+    assert_eq!(std::fs::read(&plugin).unwrap(), b"dll-bytes");
+    assert!(
+      modlist::find(&modlist::read(&target.dir).unwrap(), "Owner-ModA")
+        .unwrap()
+        .enabled
+    );
+  }
+
+  #[test]
+  fn force_does_not_reinstall_the_named_mods_dependencies() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let eco = Ecosystem::bundled();
+    let runtime = Runtime::new().unwrap();
+    let mods = ["Owner-ModC".to_string()];
+
+    runtime
+      .block_on(run(&fixture.client, &eco, &target, &mods, false))
+      .unwrap();
+
+    let plugins = target.dir.join("BepInEx/plugins");
+    let named_stray = plugins.join("Owner-ModC/stray.json");
+    let dependency_stray = plugins.join("Owner-ModA/stray.json");
+
+    std::fs::write(&named_stray, b"left behind").unwrap();
+    std::fs::write(&dependency_stray, b"left behind").unwrap();
+
+    runtime
+      .block_on(run(&fixture.client, &eco, &target, &mods, true))
+      .unwrap();
+
+    // Owner-ModC is named, so it is reinstalled from a clean folder. Owner-ModA
+    // only comes along as its dependency, and is current, so it is left alone.
+    assert!(!named_stray.exists());
+    assert!(dependency_stray.exists());
   }
 }

@@ -2,6 +2,7 @@ use crate::error::AppResult;
 use crate::target::{GAME, Target};
 use thunderstore_engine::client::ThunderstoreClient;
 use thunderstore_engine::ecosystem::Ecosystem;
+use thunderstore_engine::profile::modlist;
 use thunderstore_engine::profile::portability::{self, ImportSource};
 
 /// Writes the target's mods and config to an `.r2z` under its exports directory.
@@ -60,6 +61,9 @@ pub async fn import(
   target: &Target,
   source: &str,
 ) -> AppResult<()> {
+  // The before side of the enabled-state report. Read leniently: a directory
+  // import overwrites mods.yml, so an unreadable one must not stop it.
+  let before = modlist::read(&target.dir).unwrap_or_default();
   let outcome = portability::import_in(
     &target.dir,
     &target.base,
@@ -71,7 +75,20 @@ pub async fn import(
   )
   .await?;
 
-  super::report_installed(target, &outcome.installed)?;
+  // The import has already happened, so an unreadable record must not turn it
+  // into an error; each name is then printed without its version.
+  let recorded = modlist::read(&target.dir).unwrap_or_default();
+  // A directory import copies the profile's files rather than installing them,
+  // and so never skips anything; the other routes install like `vmm install`.
+  let verb = match outcome.source {
+    ImportSource::R2modmanDir(_) => "imported",
+    ImportSource::Archive(_) | ImportSource::Code(_) => "installed",
+  };
+
+  super::report_recorded(&recorded, verb, &outcome.installed);
+  super::report_unchanged(&recorded, &outcome.unchanged);
+  // A mod skipped as current still takes the export's enabled state.
+  super::report_state_changes(&before, &recorded, &outcome.unchanged);
 
   // Which route ran is the engine's answer, not a second look at `source`. Both
   // disclosures are about versions, and each route loses them differently.
@@ -143,6 +160,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -172,6 +190,7 @@ mod tests {
         &eco,
         &source,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -220,6 +239,7 @@ mod tests {
         &eco,
         &source,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -288,6 +308,7 @@ mod tests {
         &eco,
         &target,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -343,6 +364,7 @@ mod tests {
         &eco,
         &source,
         &["Owner-ModA".to_string()],
+        false,
       ))
       .unwrap();
 
@@ -435,6 +457,7 @@ mod tests {
         &eco,
         &destination,
         &["denikson-BepInExPack_Valheim".to_string()],
+        false,
       ))
       .unwrap();
     assert!(

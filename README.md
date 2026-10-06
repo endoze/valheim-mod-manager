@@ -100,6 +100,9 @@ delete `mod_list` from your config.
 # Install mods and their dependencies
 vmm install denikson-BepInExPack_Valheim ValheimModding-Jotunn
 
+# Reinstall a mod even if that version is already installed
+vmm install --force ZenDragon-ZenUI
+
 # List what is installed
 vmm list
 vmm list --format json
@@ -125,6 +128,9 @@ vmm uninstall --all --yes
 # Update every installed mod to its latest version
 vmm update mods
 
+# Reinstall every installed mod from a clean folder, even if already current
+vmm update mods --force
+
 # Refresh the cached package index
 vmm update manifest
 
@@ -140,11 +146,16 @@ the rest of the batch still applies and `vmm` exits non-zero, naming what
 failed. Like every other command, `--all` respects `--profile` and
 `--no-profile`, applying to that target instead of `game_dir`.
 
-`vmm update mods` reinstalls every recorded mod on every run, not only when a
-mod's version changes. That overwrites any file a mod packages inside its own
-folder under `BepInEx/plugins/`, including hand edits you've made to those
-files. Files you place directly under `BepInEx/config/` are left alone if they
-already exist. Mods you have disabled stay disabled.
+`vmm update mods` reinstalls a recorded mod only when a newer version is out
+or some of its files are missing. A mod already at its latest version with its
+files in place is skipped and counted as up to date, so hand edits to its files
+survive. Only whether files exist is checked, not their contents, so a plain
+update will not repair a file that was edited or corrupted.
+`vmm update mods --force` reinstalls every recorded mod regardless: it removes
+each mod's folder under `BepInEx/plugins/` and writes the package's files
+fresh, discarding hand edits and stray files there. Either way, files you place
+directly under `BepInEx/config/` are left alone if they already exist, and
+mods you have disabled stay disabled.
 
 #### `mods.yml` owns the whole mod tree
 
