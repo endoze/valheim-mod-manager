@@ -55,7 +55,7 @@ pub enum Command {
 /// Arguments for the install command.
 #[derive(Args)]
 pub struct InstallArgs {
-  /// One or more `Owner-ModName` identifiers.
+  /// One or more `Owner-ModName` identifiers, optionally `Owner-ModName-1.2.3`.
   #[arg(required = true)]
   pub mods: Vec<String>,
   /// Reinstall the named mods even when that version is already installed,

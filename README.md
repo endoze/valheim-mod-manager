@@ -100,6 +100,9 @@ delete `mod_list` from your config.
 # Install mods and their dependencies
 vmm install denikson-BepInExPack_Valheim ValheimModding-Jotunn
 
+# Install an exact version instead of the latest (downgrades if newer is installed)
+vmm install ValheimModding-Jotunn-2.20.0
+
 # Reinstall a mod even if that version is already installed
 vmm install --force ZenDragon-ZenUI
 
@@ -145,6 +148,10 @@ separately as unchanged rather than as a failure. If one mod's toggle fails,
 the rest of the batch still applies and `vmm` exits non-zero, naming what
 failed. Like every other command, `--all` respects `--profile` and
 `--no-profile`, applying to that target instead of `game_dir`.
+
+A mod named with a version (`Owner-ModName-1.2.3`) installs exactly that
+version, or fails if Thunderstore does not have it. `mods.yml` does not
+remember the pin, so a later `vmm update mods` moves it to the latest.
 
 `vmm update mods` reinstalls a recorded mod only when a newer version is out
 or some of its files are missing. A mod already at its latest version with its
