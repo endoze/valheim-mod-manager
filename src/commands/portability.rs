@@ -34,18 +34,16 @@ pub async fn export_code(client: &ThunderstoreClient, target: &Target) -> AppRes
 /// `source` is classified by the engine's [`portability::ImportSource`], which
 /// dispatches on what it names on disk and falls back to a code, so no flag is
 /// needed to disambiguate and vmm decides nothing about the routing. A file or
-/// code import reinstalls each mod at
-/// its **latest** version (the engine's resolution is version-agnostic and the
-/// export's pinned version is not honored), so the installed versions are printed
-/// to make any divergence visible. A directory import copies the profile as-is
-/// and downloads nothing, with one exception: any mod loader the adopted
-/// `mods.yml` names that arrives without an install record is reinstalled from
-/// Thunderstore afterwards, so it gains the record that makes it manageable and
-/// removable. That reinstall pulls the loader's **latest** version, the same as a
-/// file or code import, so the version the source profile had pinned is not
-/// preserved; [`report_reinstalled_loaders`] discloses that. Regular mods are
-/// unaffected and are still adopted at the versions the source had, and a source
-/// naming no unrecorded loader stays entirely offline.
+/// code import installs each mod at the version the export recorded, not the
+/// latest; a mod or version Thunderstore no longer has fails the import, naming
+/// it. A directory import copies the profile as-is and downloads nothing, with
+/// one exception: any mod loader the adopted `mods.yml` names that arrives
+/// without an install record is reinstalled from Thunderstore afterwards, so it
+/// gains the record that makes it manageable and removable. That reinstall pulls
+/// the loader's **latest** version, so the version the source profile had pinned
+/// is not preserved; [`report_reinstalled_loaders`] discloses that. Regular mods
+/// are unaffected and are still adopted at the versions the source had, and a
+/// source naming no unrecorded loader stays entirely offline.
 ///
 /// A directory import is a raw copy with no pre-clean: importing into a target
 /// that already holds a different set of mods overwrites `mods.yml` but leaves
@@ -90,13 +88,11 @@ pub async fn import(
   // A mod skipped as current still takes the export's enabled state.
   super::report_state_changes(&before, &recorded, &outcome.unchanged);
 
-  // Which route ran is the engine's answer, not a second look at `source`. Both
-  // disclosures are about versions, and each route loses them differently.
-  match outcome.source {
-    ImportSource::R2modmanDir(_) => report_reinstalled_loaders(&outcome.reinstalled),
-    ImportSource::Archive(_) | ImportSource::Code(_) => {
-      println!("\nNote: an import installs each mod's latest version, not the exported one.");
-    }
+  // Which route ran is the engine's answer, not a second look at `source`. Only
+  // an adoption can lose a version the source recorded, through the loader it
+  // reinstalls at latest.
+  if let ImportSource::R2modmanDir(_) = outcome.source {
+    report_reinstalled_loaders(&outcome.reinstalled);
   }
 
   Ok(())
@@ -223,6 +219,55 @@ mod tests {
         .dir
         .join("BepInEx/plugins/Owner-ModA/ModA.dll")
         .exists()
+    );
+  }
+
+  #[test]
+  fn a_file_import_installs_each_mod_at_its_exported_version() {
+    let fixture = Fixture::new();
+    let source = fixture.target();
+    let eco = Ecosystem::bundled();
+    let runtime = Runtime::new().unwrap();
+
+    runtime
+      .block_on(crate::commands::install::run(
+        &fixture.client,
+        &eco,
+        &source,
+        &["Owner-ModD-1.0.0".to_string()],
+        false,
+      ))
+      .unwrap();
+
+    export_file(&source).unwrap();
+
+    let archive = std::fs::read_dir(source.exports_dir())
+      .unwrap()
+      .flatten()
+      .next()
+      .unwrap()
+      .path();
+    let destination = fixture.profile_target("imported");
+
+    runtime
+      .block_on(import(
+        &fixture.client,
+        &eco,
+        &destination,
+        archive.to_str().unwrap(),
+      ))
+      .unwrap();
+
+    let mods = modlist::read(&destination.dir).unwrap();
+
+    // Owner-ModD's latest is 2.0.0, so 1.0.0 shows the export's version was
+    // kept rather than replaced with the latest.
+    assert_eq!(
+      modlist::find(&mods, "Owner-ModD")
+        .unwrap()
+        .version_number
+        .to_string(),
+      "1.0.0"
     );
   }
 

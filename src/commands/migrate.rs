@@ -460,10 +460,10 @@ mod tests {
     assert!(message.contains("migration stopped part way through."));
     assert!(message.contains("Owner-Delisted"));
     assert!(message.contains("vmm migrate"));
-    // The reason Owner-Delisted failed (an unresolved dependency, standing in
-    // for a delisted mod) is now surfaced too, not just its name.
+    // The reason Owner-Delisted failed (it does not resolve, standing in for a
+    // delisted mod) is now surfaced too, not just its name.
     assert!(message.contains("Known reasons:"));
-    assert!(message.contains("unresolved dependencies"));
+    assert!(message.contains("could not resolve Owner-Delisted"));
   }
 
   #[test]
