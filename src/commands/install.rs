@@ -488,4 +488,136 @@ mod tests {
     assert!(!named_stray.exists());
     assert!(dependency_stray.exists());
   }
+
+  /// The version `mods.yml` records for `name` in `target`.
+  fn recorded_version(target: &Target, name: &str) -> String {
+    let mods = modlist::read(&target.dir).unwrap();
+
+    modlist::find(&mods, name)
+      .unwrap()
+      .version_number
+      .to_string()
+  }
+
+  #[test]
+  fn installing_a_named_version_installs_exactly_that_version() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let eco = Ecosystem::bundled();
+
+    Runtime::new()
+      .unwrap()
+      .block_on(run(
+        &fixture.client,
+        &eco,
+        &target,
+        &["Owner-ModD-1.0.0".to_string()],
+        false,
+      ))
+      .unwrap();
+
+    // Owner-ModD's latest is 2.0.0, so 1.0.0 shows the requested version was
+    // honored rather than discarded.
+    assert_eq!(recorded_version(&target, "Owner-ModD"), "1.0.0");
+  }
+
+  #[test]
+  fn installing_an_older_version_downgrades_a_newer_install() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let eco = Ecosystem::bundled();
+    let runtime = Runtime::new().unwrap();
+
+    runtime
+      .block_on(run(
+        &fixture.client,
+        &eco,
+        &target,
+        &["Owner-ModD".to_string()],
+        false,
+      ))
+      .unwrap();
+
+    assert_eq!(recorded_version(&target, "Owner-ModD"), "2.0.0");
+
+    runtime
+      .block_on(run(
+        &fixture.client,
+        &eco,
+        &target,
+        &["Owner-ModD-1.0.0".to_string()],
+        false,
+      ))
+      .unwrap();
+
+    assert_eq!(recorded_version(&target, "Owner-ModD"), "1.0.0");
+  }
+
+  #[test]
+  fn installing_a_version_thunderstore_does_not_publish_fails() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let eco = Ecosystem::bundled();
+
+    let message = Runtime::new()
+      .unwrap()
+      .block_on(run(
+        &fixture.client,
+        &eco,
+        &target,
+        &["Owner-ModD-9.9.9".to_string()],
+        false,
+      ))
+      .unwrap_err()
+      .to_string();
+
+    // Fails naming the missing version, rather than quietly installing the
+    // latest in its place.
+    assert!(
+      message.contains("Owner-ModD has no version 9.9.9"),
+      "got: {message}"
+    );
+    assert!(
+      modlist::find(
+        &modlist::read(&target.dir).unwrap_or_default(),
+        "Owner-ModD"
+      )
+      .is_none()
+    );
+  }
+
+  #[test]
+  fn naming_a_disabled_mod_with_a_version_re_enables_it() {
+    let fixture = Fixture::new();
+    let target = fixture.target();
+    let eco = Ecosystem::bundled();
+    let runtime = Runtime::new().unwrap();
+    let mods = ["Owner-ModD-1.0.0".to_string()];
+
+    runtime
+      .block_on(run(&fixture.client, &eco, &target, &mods, false))
+      .unwrap();
+
+    thunderstore_engine::profile::set_enabled_in(
+      &target.dir,
+      &eco,
+      crate::target::GAME,
+      "Owner-ModD",
+      false,
+    )
+    .unwrap();
+
+    // `installing_a_disabled_mod_by_name_re_enables_it`, with the name carrying
+    // a version. The record keys on `Owner-ModD`, so the request has to match it
+    // by name alone to count as explicit rather than as a dependency to keep
+    // disabled.
+    runtime
+      .block_on(run(&fixture.client, &eco, &target, &mods, false))
+      .unwrap();
+
+    let recorded = modlist::read(&target.dir).unwrap();
+
+    assert!(modlist::find(&recorded, "Owner-ModD").unwrap().enabled);
+    assert_eq!(recorded_version(&target, "Owner-ModD"), "1.0.0");
+  }
 }

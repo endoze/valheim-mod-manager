@@ -2275,9 +2275,9 @@ dependencies = [
 
 [[package]]
 name = "thunderstore-engine"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f4bdbda8be23f935fea106d60680517714ff16011bd16a6e0a617899c683427"
+checksum = "389df071d6ab67d845b73f8184261d034fd1d7ce7b0c032183cdce97a31d8bb6"
 dependencies = [
  "base64 0.22.1",
  "bincode",

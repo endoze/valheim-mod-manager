@@ -34,37 +34,88 @@ pub fn mod_zip_with(version: &str, dll_name: &str) -> Vec<u8> {
   zip.finish().unwrap().into_inner()
 }
 
-/// The package index for `Owner-ModA`, `Owner-ModB`, `Owner-ModC`, and the
-/// `denikson-BepInExPack_Valheim` loader, with downloads pointed at `server_url`.
+/// The package index for `Owner-ModA`, `Owner-ModB`, `Owner-ModC`, `Owner-ModD`,
+/// and the `denikson-BepInExPack_Valheim` loader, with downloads pointed at
+/// `server_url`.
 ///
 /// `ModA` and `ModB` depend on nothing, so each installs as a single package.
 /// `ModC` depends on `Owner-ModA-1.0.0`, so installing it exercises a real
 /// dependency closure, the engine's resolver discards the version suffix
 /// (`full_name_prefix`) and installs `Owner-ModA` alongside it.
+///
+/// `ModD` is the one package with two versions, 1.0.0 and a newer 2.0.0, each
+/// downloaded from its own `/dl/ModD-<version>.zip`, so a test can tell an
+/// install of an exact `Owner-ModD-1.0.0` apart from one of the latest.
 pub fn index_json(server_url: &str) -> String {
-  let package = |owner: &str, name: &str, version: &str, dependencies: &str| {
+  // One entry of a package's `versions`, downloaded from `/dl/<archive>.zip`.
+  let version =
+    |owner: &str, name: &str, version: &str, dependencies: &str, archive: &str, created: &str| {
+      format!(
+        r#"{{"name":"{name}","full_name":"{owner}-{name}",
+      "description":"A mod","icon":"icon.png","version_number":"{version}",
+      "dependencies":[{dependencies}],"download_url":"{server_url}/dl/{archive}.zip",
+      "downloads":1,"date_created":"{created}",
+      "website_url":"","is_active":true,"uuid4":"ver-{archive}","file_size":1024}}"#
+      )
+    };
+  let package = |owner: &str, name: &str, versions: &[String]| {
     format!(
       r#"{{"name":"{name}","full_name":"{owner}-{name}","owner":"{owner}",
       "package_url":"https://example.com/{name}",
       "date_created":"2024-01-01T12:00:00Z","date_updated":"2024-01-02T12:00:00Z",
       "uuid4":"pkg-{name}","rating_score":1,"is_pinned":false,
       "is_deprecated":false,"has_nsfw_content":false,"categories":[],
-      "versions":[{{"name":"{name}","full_name":"{owner}-{name}",
-      "description":"A mod","icon":"icon.png","version_number":"{version}",
-      "dependencies":[{dependencies}],"download_url":"{server_url}/dl/{name}.zip",
-      "downloads":1,"date_created":"2024-01-01T12:00:00Z",
-      "website_url":"","is_active":true,"uuid4":"ver-{name}","file_size":1024}}]}}"#
+      "versions":[{}]}}"#,
+      versions.join(",")
+    )
+  };
+  let single = |owner: &str, name: &str, number: &str, dependencies: &str| {
+    package(
+      owner,
+      name,
+      &[version(
+        owner,
+        name,
+        number,
+        dependencies,
+        name,
+        "2024-01-01T12:00:00Z",
+      )],
     )
   };
 
   format!(
-    "[{},{},{},{}]",
-    package("Owner", "ModA", "1.0.0", ""),
-    package("Owner", "ModB", "1.0.0", ""),
-    package("Owner", "ModC", "1.0.0", "\"Owner-ModA-1.0.0\""),
+    "[{},{},{},{},{}]",
+    single("Owner", "ModA", "1.0.0", ""),
+    single("Owner", "ModB", "1.0.0", ""),
+    single("Owner", "ModC", "1.0.0", "\"Owner-ModA-1.0.0\""),
+    // The engine takes the latest version by `date_created`, so 2.0.0 is the
+    // later of the two.
+    package(
+      "Owner",
+      "ModD",
+      &[
+        version(
+          "Owner",
+          "ModD",
+          "2.0.0",
+          "",
+          "ModD-2.0.0",
+          "2024-02-01T12:00:00Z",
+        ),
+        version(
+          "Owner",
+          "ModD",
+          "1.0.0",
+          "",
+          "ModD-1.0.0",
+          "2024-01-01T12:00:00Z",
+        ),
+      ],
+    ),
     // A real loader identifier, so `Ecosystem::modloader_package` recognises it
     // and the loader-specific paths are reachable from tests.
-    package("denikson", "BepInExPack_Valheim", "5.4.2200", "")
+    single("denikson", "BepInExPack_Valheim", "5.4.2200", "")
   )
 }
 
@@ -126,6 +177,8 @@ impl Fixture {
       ("ModA", mod_zip("1.0.0")),
       ("ModB", mod_zip_with("1.0.0", "ModB.dll")),
       ("ModC", mod_zip_with("1.0.0", "ModC.dll")),
+      ("ModD-1.0.0", mod_zip_with("1.0.0", "ModD.dll")),
+      ("ModD-2.0.0", mod_zip_with("2.0.0", "ModD.dll")),
       ("BepInExPack_Valheim", loader_zip()),
     ] {
       server

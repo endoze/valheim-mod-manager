@@ -253,15 +253,16 @@ vmm import a1b2c3d4-0000-0000-0000-000000000000
 vmm import ~/.config/r2modmanPlus-local/Valheim/profiles/Default
 ```
 
-A file or profile-code import installs each mod's **latest** version, not the
-version the export pinned, and prints what it installed so any difference is
-visible.
+A file or profile-code import installs each mod at the version the export
+recorded, not the latest. If Thunderstore no longer has a mod or that version,
+the import fails and names it, and its config files are not restored.
 
 Importing a directory adopts it as-is at the versions the source recorded, and
 downloads nothing, with one exception: if the adopted `mods.yml` names a mod
 loader, the loader is reinstalled from Thunderstore afterward (at its
-**latest** version, same as above) so it gains the install record that makes
-it manageable and removable; a source naming no loader stays fully offline. It
+**latest** version, not the one the source recorded) so it gains the install
+record that makes it manageable and removable; a source naming no loader stays
+fully offline. It
 is also a raw copy with no pre-clean: if the destination already has different
 mods installed, `mods.yml` is overwritten while the previous mods' files stay
 on disk, now untracked and orphaned. Import into an empty target, or accept
