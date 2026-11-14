@@ -2275,9 +2275,9 @@ dependencies = [
 
 [[package]]
 name = "thunderstore-engine"
-version = "0.3.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "389df071d6ab67d845b73f8184261d034fd1d7ce7b0c032183cdce97a31d8bb6"
+checksum = "7bd15c04de53068d4352b6ac8315e6de66c862feca1053144a99894bc066f808"
 dependencies = [
  "base64 0.22.1",
  "bincode",
@@ -2285,6 +2285,8 @@ dependencies = [
  "crc32fast",
  "futures",
  "lasso",
+ "memchr",
+ "mockito",
  "reqwest",
  "serde",
  "serde_json",
@@ -2691,7 +2693,6 @@ dependencies = [
  "config",
  "dirs",
  "indicatif",
- "mockito",
  "serde",
  "serde_json",
  "shellexpand",
@@ -2703,7 +2704,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "zip",
 ]
 
 [[package]]

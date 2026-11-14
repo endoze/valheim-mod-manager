@@ -1,6 +1,6 @@
 use crate::cli::ProfileCommand;
 use crate::error::AppResult;
-use crate::target::GAME;
+use crate::target::{GAME, profile_error};
 use std::path::Path;
 use thunderstore_engine::profile::{layout, modlist};
 
@@ -13,22 +13,10 @@ use thunderstore_engine::profile::{layout, modlist};
 /// exists. What is left here is wording, dispatch, and the odd bit of pre-flight
 /// reporting (whether a `println!` is warranted) that the engine has no reason
 /// to know about.
-/// Refuses a name that does not already exist, in the same words `vmm profile
-/// use` and `--profile` use for it.
 ///
-/// The engine's `delete`, `rename`, and `duplicate` do not check existence
-/// first: they let `remove_dir_all`, `fs::rename`, and `read_dir` fail, which
-/// surfaces an errno rather than advice, and words the one mistake three more
-/// ways. [`layout::require_profile`] is the same predicate `use_profile` and
-/// `InstallTarget::resolve` gate on, so going through it is what keeps all of
-/// them saying the same thing.
-fn require_profile(base: &Path, name: &str) -> AppResult<()> {
-  layout::require_profile(base, GAME, name)
-    .map_err(|bad| crate::target::profile_error(bad.into()))?;
-
-  Ok(())
-}
-
+/// Every operation that takes a profile name words its refusal through
+/// [`profile_error`], so a missing or unusable name reads the same whichever
+/// command it came from.
 pub fn run(base: &Path, command: &ProfileCommand) -> AppResult<()> {
   match command {
     ProfileCommand::List => {
@@ -66,7 +54,7 @@ pub fn run(base: &Path, command: &ProfileCommand) -> AppResult<()> {
       }
     }
     ProfileCommand::Create { name } => {
-      let dir = layout::create(base, GAME, name)?;
+      let dir = layout::create(base, GAME, name).map_err(profile_error)?;
 
       println!("created {}", dir.display());
     }
@@ -77,8 +65,7 @@ pub fn run(base: &Path, command: &ProfileCommand) -> AppResult<()> {
       // anything.
       let was_selected = layout::read_selection(base, GAME).as_deref() == Some(name.as_str());
 
-      require_profile(base, name)?;
-      layout::delete(base, GAME, name)?;
+      layout::delete(base, GAME, name).map_err(profile_error)?;
 
       println!("deleted {name}");
 
@@ -89,22 +76,19 @@ pub fn run(base: &Path, command: &ProfileCommand) -> AppResult<()> {
     ProfileCommand::Rename { from, to } => {
       // `layout::rename` carries the selection along itself when it pointed
       // at `from`, so nothing further is needed here.
-      require_profile(base, from)?;
-      layout::rename(base, GAME, from, to)?;
+      layout::rename(base, GAME, from, to).map_err(profile_error)?;
 
       println!("renamed {from} to {to}");
     }
     ProfileCommand::Duplicate { from, to } => {
-      require_profile(base, from)?;
-
-      let dir = layout::duplicate(base, GAME, from, to)?;
+      let dir = layout::duplicate(base, GAME, from, to).map_err(profile_error)?;
 
       println!("duplicated {from} to {}", dir.display());
     }
     ProfileCommand::Use { name } => {
       // The check and the write both stay in `use_profile`; vmm only re-words
       // the refusal it carries back.
-      layout::use_profile(base, GAME, name).map_err(crate::target::profile_error)?;
+      layout::use_profile(base, GAME, name).map_err(profile_error)?;
 
       println!("using profile {name}");
     }
@@ -200,6 +184,31 @@ mod tests {
 
     // Refusing left nothing half-made: no directory for the copy's target name.
     assert!(!layout::profile_dir(base, GAME, "other").exists());
+  }
+
+  #[test]
+  fn a_name_windows_cannot_hold_is_refused_with_the_reason() {
+    let dir = tempdir().unwrap();
+    let base = dir.path();
+
+    let message = run(
+      base,
+      &ProfileCommand::Create {
+        name: "what?".to_string(),
+      },
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(
+      message.contains("can't be used as a profile name"),
+      "got: {message}"
+    );
+    assert!(
+      message.contains("'?'"),
+      "must name the character; got: {message}"
+    );
+    assert!(layout::list(base, GAME).unwrap().is_empty());
   }
 
   #[test]

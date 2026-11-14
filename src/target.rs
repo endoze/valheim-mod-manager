@@ -1,6 +1,6 @@
 use crate::error::{AppError, AppResult};
 use std::path::PathBuf;
-use thunderstore_engine::profile::layout::BadProfile;
+use thunderstore_engine::profile::layout::{BadName, BadProfile};
 
 /// The Valheim community slug, which is also the engine's ecosystem game key.
 pub const GAME: &str = "valheim";
@@ -31,11 +31,8 @@ pub fn resolve(base: PathBuf, game_dir: PathBuf, profile: Option<&str>) -> AppRe
   Target::resolve(base, game_dir, GAME, profile).map_err(profile_error)
 }
 
-/// vmm's wording for an engine failure that refused a profile name.
-///
-/// Only `Missing` has advice worth adding: a name that could escape the profiles
-/// directory is not one a user should be offered the chance to create, so it
-/// keeps the engine's own sentence, as does any other kind of failure.
+/// vmm's wording for an engine failure that refused a profile name. Any other
+/// kind of failure keeps the engine's own sentence.
 ///
 /// Takes the whole [`thunderstore_engine::Error`] rather than a
 /// [`BadProfile`] so it can be dropped onto any engine operation that gates on a
@@ -46,8 +43,44 @@ pub fn profile_error(error: thunderstore_engine::Error) -> AppError {
     thunderstore_engine::Error::BadProfile(BadProfile::Missing { name, .. }) => {
       missing_profile_error(&name)
     }
+    thunderstore_engine::Error::BadProfile(BadProfile::InvalidName { name, reason }) => {
+      invalid_name_error(&name, &reason)
+    }
     other => other.into(),
   }
+}
+
+/// The advice returned when a profile name is refused, saying which rule it
+/// breaks.
+pub fn invalid_name_error(name: &str, reason: &BadName) -> AppError {
+  let why = match reason {
+    BadName::Empty => "A profile name can't be empty.".to_string(),
+    BadName::Escapes => "A profile name has to be a single folder name, so it can't be \
+                         `.` or `..` or contain `/` or `\\`."
+      .to_string(),
+    BadName::DrivePrefix => "It starts with a drive letter and a colon, which Windows reads \
+                             as a path on that drive."
+      .to_string(),
+    BadName::Reserved => "Windows reserves it as a device name (such as CON, NUL, COM1, or \
+                          LPT1), with or without an extension."
+      .to_string(),
+    BadName::ForbiddenChar(found) => format!(
+      "It contains {found:?}, which Windows doesn't allow in a folder name. Leave out \
+       < > : \" | ? * and control characters."
+    ),
+    BadName::TrailingDotOrSpace => "It ends with a dot or a space, which Windows drops from \
+                                    folder names."
+      .to_string(),
+  };
+
+  AppError::advice(
+    format!("{name:?} can't be used as a profile name."),
+    format!(
+      "{why} Profile names follow Windows folder rules on every platform. \
+       Nothing was changed."
+    ),
+    &[],
+  )
 }
 
 /// Whether `name` can stand as a bare argument in a command a user copies.
@@ -132,19 +165,21 @@ mod tests {
     let base = tempdir().unwrap();
     let game_dir = tempdir().unwrap();
 
-    // An unsafe name is not a profile a user could be offered the chance to
-    // create, so it keeps the engine's refusal rather than the advice above.
-    let error = resolve(
+    let message = resolve(
       base.path().to_path_buf(),
       game_dir.path().to_path_buf(),
       Some("../escape"),
     )
-    .unwrap_err();
+    .unwrap_err()
+    .to_string();
 
     assert_eq!(
-      error.to_string(),
-      "Profile error: invalid profile name \"../escape\""
+      message,
+      invalid_name_error("../escape", &BadName::Escapes).to_string()
     );
+    // An unsafe name is not a profile a user could be offered the chance to
+    // create.
+    assert!(!message.contains("vmm profile create"), "got: {message}");
   }
 
   #[test]

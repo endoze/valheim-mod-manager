@@ -123,6 +123,7 @@ mod tests {
   use crate::test_support::Fixture;
   use base64::Engine as _;
   use thunderstore_engine::profile::modlist;
+  use thunderstore_engine::test_support::mockito;
   use tokio::runtime::Runtime;
 
   /// A `mods.yml` naming `denikson-BepInExPack_Valheim` at 5.4.2200, shaped the
@@ -303,29 +304,17 @@ mod tests {
     );
 
     fixture
-      .server
+      .mock
+      .server_mut()
       .mock("GET", "/api/experimental/legacyprofile/get/shared-code/")
       .with_status(200)
       .with_body(payload)
       .create();
 
-    // `fixture.client` only overrides `package_index_url`, so its `base_url`
-    // is still the real Thunderstore host. The profile-code endpoints are
-    // built from `base_url`, so a client for this path must point it at the
-    // mock server too.
-    let url = fixture.server.url();
-    let index_url = format!("{url}/pkg/");
-    let client = ThunderstoreClient::builder()
-      .base_url(url)
-      .package_index_url(index_url)
-      .cache_dir(fixture.base.path())
-      .build()
-      .unwrap();
-
     let destination = fixture.profile_target("shared");
 
     runtime
-      .block_on(import(&client, &eco, &destination, "shared-code"))
+      .block_on(import(&fixture.client, &eco, &destination, "shared-code"))
       .unwrap();
 
     let mods = modlist::read(&destination.dir).unwrap();
