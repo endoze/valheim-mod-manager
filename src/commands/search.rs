@@ -1,9 +1,11 @@
 use crate::error::AppResult;
 use thunderstore_engine::client::ThunderstoreClient;
+use thunderstore_engine::models::PackageIndex;
+use thunderstore_engine::query::{self, BrowseQuery, PackageRow, SortDirection, SortKey};
 
 pub async fn run(client: &ThunderstoreClient, term: &str) -> AppResult<()> {
   let manifest = client.get_manifest().await?;
-  let results = manifest.search(term);
+  let results = ranked_matches(&manifest, term);
 
   if results.is_empty() {
     println!("No mods found matching '{term}'");
@@ -14,22 +16,13 @@ pub async fn run(client: &ThunderstoreClient, term: &str) -> AppResult<()> {
   println!("Found {} mods matching '{term}':\n", results.len());
 
   for idx in results {
-    let Some(package) = manifest.get_package_at(idx) else {
+    let Some(row) = PackageRow::new(&manifest, idx) else {
       continue;
     };
 
-    let latest = package.latest_version();
-    let version = latest
-      .and_then(|v| v.version_number.clone())
-      .unwrap_or_else(|| "Unknown".to_string());
-    let description = latest
-      .and_then(|v| v.description.clone())
-      .unwrap_or_default();
-    let identifier = package_identifier(
-      package.full_name.as_deref(),
-      package.owner.as_deref(),
-      package.name.as_deref(),
-    );
+    let version = row.version_number().unwrap_or("Unknown");
+    let description = row.description().unwrap_or_default();
+    let identifier = package_identifier(row.full_name(), row.owner(), row.name());
 
     println!("{identifier} ({version})");
 
@@ -43,14 +36,24 @@ pub async fn run(client: &ThunderstoreClient, term: &str) -> AppResult<()> {
   Ok(())
 }
 
+/// The indices of the packages in `index` matching `term`, best match first.
+///
+/// Uses the engine's best-match ranking with r2modman's defaults, so deprecated
+/// and NSFW packages are left out and `valheim plus` finds `ValheimPlus`.
+fn ranked_matches(index: &PackageIndex, term: &str) -> Vec<usize> {
+  let query = BrowseQuery::new()
+    .search(term)
+    .sort(SortKey::BestMatch, SortDirection::Descending);
+
+  query::browse(index, &query)
+}
+
 /// The `Owner-ModName` identifier to print for one search result.
 ///
 /// `full_name` already *is* that identifier, so when the index carries one it is
-/// used whole rather than treated as a half to prefix. This matters because
-/// `PackageIndex::search` matches on either `name` or `full_name`, and
-/// `get_package_at` preserves both fields as it found them: a package indexed
-/// with only a `full_name` is matched, reaches this loop, and prefixing it with
-/// the owner would print `Owner-Owner-ModName`.
+/// used whole rather than treated as a half to prefix: a package indexed with
+/// only a `full_name` can still match, and prefixing it with the owner would
+/// print `Owner-Owner-ModName`.
 ///
 /// Only when `full_name` is absent is the identifier composed from its two
 /// halves, each falling back to `Unknown` so a partial record still prints a
@@ -69,8 +72,8 @@ fn package_identifier(full_name: Option<&str>, owner: Option<&str>, name: Option
 #[cfg(test)]
 mod tests {
   use super::*;
-  use mockito::Server;
   use tempfile::tempdir;
+  use thunderstore_engine::test_support::mockito::{self, Server};
   use tokio::runtime::Runtime;
 
   fn test_manifest_json() -> &'static str {
@@ -193,5 +196,65 @@ mod tests {
       "Owner-Unknown"
     );
     assert_eq!(package_identifier(None, None, None), "Unknown-Unknown");
+  }
+
+  /// A package index built from `(name, downloads, deprecated)` rows, all owned
+  /// by `Owner`, in the order given.
+  fn index_of(rows: &[(&str, u32, bool)]) -> PackageIndex {
+    let packages: Vec<serde_json::Value> = rows
+      .iter()
+      .map(|(name, downloads, deprecated)| {
+        serde_json::json!({
+          "name": name,
+          "full_name": format!("Owner-{name}"),
+          "owner": "Owner",
+          "date_created": "2024-01-01T12:00:00Z",
+          "date_updated": "2024-01-02T12:00:00Z",
+          "is_deprecated": deprecated,
+          "categories": [],
+          "versions": [{
+            "name": name,
+            "full_name": format!("Owner-{name}"),
+            "description": "",
+            "version_number": "1.0.0",
+            "dependencies": [],
+            "downloads": downloads,
+            "date_created": "2024-01-01T12:00:00Z",
+          }],
+        })
+      })
+      .collect();
+    let packages: Vec<thunderstore_engine::models::Package> =
+      serde_json::from_value(serde_json::Value::Array(packages)).unwrap();
+
+    PackageIndex::from(packages)
+  }
+
+  fn matched_names(index: &PackageIndex, term: &str) -> Vec<String> {
+    ranked_matches(index, term)
+      .into_iter()
+      .filter_map(|idx| PackageRow::new(index, idx)?.name().map(str::to_string))
+      .collect()
+  }
+
+  #[test]
+  fn the_exact_name_ranks_above_a_more_downloaded_partial_match() {
+    let index = index_of(&[("BetterModA", 50_000, false), ("ModA", 10, false)]);
+
+    assert_eq!(matched_names(&index, "moda"), ["ModA", "BetterModA"]);
+  }
+
+  #[test]
+  fn search_words_match_a_camel_case_name() {
+    let index = index_of(&[("ValheimPlus", 10, false), ("Unrelated", 10, false)]);
+
+    assert_eq!(matched_names(&index, "valheim plus"), ["ValheimPlus"]);
+  }
+
+  #[test]
+  fn a_deprecated_package_is_left_out() {
+    let index = index_of(&[("ModA", 10, true), ("ModAPlus", 10, false)]);
+
+    assert_eq!(matched_names(&index, "moda"), ["ModAPlus"]);
   }
 }

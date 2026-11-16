@@ -1,12 +1,12 @@
 use crate::config::LaunchConfig;
 use crate::error::{AppError, AppResult};
 use crate::target::{GAME, Target};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use thunderstore_engine::Error;
 use thunderstore_engine::ecosystem::Ecosystem;
 use thunderstore_engine::profile::launch::{
-  self, HostOs, LaunchContext, LaunchMode, Runtime, StorePlatform, bepinex_preloader,
-  ensure_loader_scripts_executable, launch_plan_in, stage_for_launch_in, steam_launch_options,
-  write_wrapper_script,
+  self, HostOs, LaunchContext, LaunchMode, LaunchNotice, Runtime, StorePlatform, launch_plan_in,
+  prepare_launch, write_wrapper_script,
 };
 use thunderstore_engine::steam::{Severity, Visibility, visibility};
 
@@ -18,38 +18,6 @@ pub fn combined_args(config: &LaunchConfig, extra_args: &[String]) -> Vec<String
   args.extend(extra_args.iter().cloned());
 
   args
-}
-
-/// Stages the target's root loader files into the game directory, unless the
-/// target *is* the game directory.
-///
-/// The engine's own `stage_for_launch_in` already detects a same-file
-/// destination by filesystem identity (`same_file`/`stage_one_file`) and
-/// leaves it untouched rather than copying onto itself, so this check is not
-/// the only thing standing between a game-dir-mode launch and a truncated
-/// loader proxy. It is a second line of defense, in case some future
-/// loader's staging destination is ever computed as something other than
-/// `game_dir.join(name)`, and it also skips a pointless directory walk in
-/// the common game-dir-mode case, where the engine would filter out every
-/// entry as already in place anyway. It additionally means a game-dir-mode
-/// target whose directory does not exist yet returns an empty list instead
-/// of surfacing the engine's `read_dir` error.
-pub fn stage_if_needed(
-  target: &Target,
-  eco: &Ecosystem,
-  ctx: &LaunchContext,
-) -> AppResult<Vec<PathBuf>> {
-  if !target.needs_staging() {
-    return Ok(Vec::new());
-  }
-
-  let staged = stage_for_launch_in(&target.dir, eco, GAME, &target.game_dir, ctx)?;
-
-  for path in &staged {
-    tracing::info!("staged {}", path.display());
-  }
-
-  Ok(staged)
 }
 
 /// Refuses a launch whose Steam-resolved paths the running Steam client cannot
@@ -108,7 +76,7 @@ fn apply_visibility(label: &str, path: &Path, verdict: Visibility) -> AppResult<
         format!(
           "{} is not visible to the running Steam client, so a launch through \
            Steam would silently do nothing. The explanation above says why. \
-           Nothing was changed.",
+           The game was not started.",
           path.display()
         ),
         &[],
@@ -151,24 +119,12 @@ fn suspect_message(label: &str, path: &Path) -> String {
   )
 }
 
-/// Refuses a modded launch into a target with no mod loader.
-///
-/// `launch_plan_in` already fails in this case, but it fails for several other
-/// reasons too (a script-injected mode with no script, an unresolvable plan), so
-/// its error cannot be reworded into loader-specific guidance. Probing
-/// separately keeps the message accurate. `bepinex_preloader` errors exactly when
-/// `<dir>/BepInEx/core` holds no preloader assembly, and it reads the filesystem
-/// rather than `mods.yml`, so a loader installed by hand or by r2modman is not
-/// reported as missing.
+/// The refusal for a modded launch into a target with no mod loader.
 ///
 /// A target with no loader is the ordinary state after `vmm uninstall --all`, so
 /// this is guidance rather than a fault.
-fn require_loader(target: &Target, runtime: Runtime) -> AppResult<()> {
-  if bepinex_preloader(&target.dir, runtime).is_ok() {
-    return Ok(());
-  }
-
-  Err(AppError::advice(
+fn no_loader_error(target: &Target) -> AppError {
+  AppError::advice(
     format!(
       "there is no mod loader installed in {}.",
       crate::target::describe(target)
@@ -177,7 +133,17 @@ fn require_loader(target: &Target, runtime: Runtime) -> AppResult<()> {
      Installing any mod pulls the loader in as a dependency. To play without \
      mods, start the game from Steam as usual, or launch vanilla through vmm.",
     &["vmm install <Owner-ModName>", "vmm launch --vanilla"],
-  ))
+  )
+}
+
+/// vmm's wording for the launch refusals it has advice for. Any other engine
+/// error is returned as is.
+fn launch_error(target: &Target, error: Error) -> AppError {
+  match error {
+    Error::NoModLoader { .. } => no_loader_error(target),
+    Error::MissingGameDir { path } => crate::missing_game_dir_error(&path),
+    other => other.into(),
+  }
 }
 
 /// The refusal [`run`] returns when the host is not one the engine recognises.
@@ -185,7 +151,7 @@ fn require_loader(target: &Target, runtime: Runtime) -> AppResult<()> {
 /// macOS is deliberately absent from the list. `HostOs::detect` does recognise
 /// it, so this is not the refusal a macOS user sees: they get the engine's own
 /// "macOS launch is not supported: the injection chain requires r2modman's
-/// closed-source proxy" from `launch_plan_in` instead. Naming macOS here would
+/// closed-source proxy" from `prepare_launch` instead. Naming macOS here would
 /// only ever promise, to some *other* host, support that does not exist either.
 ///
 /// Pulled out as a pure function so the wording is testable: `HostOs::detect`
@@ -200,85 +166,14 @@ fn unsupported_os_error() -> AppError {
   )
 }
 
-/// The first `<root>/Steam/steam.exe` that exists, over `program_files` in order.
-fn steam_exe_in(program_files: &[PathBuf]) -> Option<PathBuf> {
-  program_files
-    .iter()
-    .map(|root| root.join("Steam").join("steam.exe"))
-    .find(|candidate| candidate.is_file())
-}
-
-/// The Steam executable to start, when this platform needs one named explicitly.
-///
-/// The engine's [`launch::LaunchPlan::to_command`] builds `Command::new("steam")`
-/// for [`launch::LaunchProgram::Steam`], which resolves on Linux, where Steam is
-/// on `PATH`. On Windows it does not: the installer adds nothing to `PATH`, so
-/// that spawn fails outright and the *default* configuration (`store = "steam"`)
-/// could never launch anything.
-///
-/// Only the two standard install roots are searched. A Steam installed anywhere
-/// else falls through to `None`, which leaves the engine's `PATH` lookup in
-/// place: no worse than the current behaviour, and it still works for anyone who
-/// has put Steam on `PATH` themselves. Reading Steam's own `SteamExe` value out
-/// of the registry would cover a relocated install, but that needs a Windows-only
-/// registry dependency, and this is the smaller change.
-///
-/// Gated on `cfg!(windows)` rather than `#[cfg]` so the whole path stays compiled
-/// and tested everywhere; the guard also keeps a `ProgramFiles` variable that
-/// happens to be set on a non-Windows host from diverting a launch.
-fn steam_exe() -> Option<PathBuf> {
-  if !cfg!(windows) {
-    return None;
-  }
-
-  let roots: Vec<PathBuf> = ["ProgramFiles(x86)", "ProgramFiles"]
-    .iter()
-    .filter_map(std::env::var_os)
-    .map(PathBuf::from)
-    .collect();
-
-  steam_exe_in(&roots)
-}
-
-/// `steam_exe -applaunch <id> <args>`, the invocation the engine expresses as
-/// [`launch::LaunchProgram::Steam`], against an explicitly resolved executable.
-///
-/// [`launch::LaunchPlan::env`] is deliberately not carried over: the engine
-/// documents that it cannot reach the game through `-applaunch`, because Steam
-/// is already running with an environment of its own.
-fn steam_command(steam_exe: &Path, steam_app_id: u32, args: &[String]) -> std::process::Command {
-  let mut command = std::process::Command::new(steam_exe);
-
-  command.arg("-applaunch").arg(steam_app_id.to_string());
-  command.args(args);
-
-  command
-}
-
-/// The process to spawn for `plan`, overriding the engine's own translation only
-/// where that translation cannot work on this platform.
-///
-/// Every other plan shape, and a Steam plan whose executable could not be found,
-/// goes through [`launch::LaunchPlan::to_command`] unchanged.
-fn plan_command(plan: &launch::LaunchPlan, game_dir: &Path) -> AppResult<std::process::Command> {
-  if let launch::LaunchProgram::Steam { steam_app_id } = plan.program
-    && let Some(exe) = steam_exe()
-  {
-    return Ok(steam_command(&exe, steam_app_id, &plan.args));
-  }
-
-  Ok(plan.to_command(game_dir)?)
-}
-
 /// Launches the game with the target's mods applied.
 ///
-/// The engine computes the invocation; vmm spawns it. A Linux native Steam launch
+/// The engine prepares the launch and vmm spawns it. A Linux native Steam launch
 /// injects through a wrapper script Steam must invoke, and Steam stores launch
-/// options in `localconfig.vdf`, which no manager writes, so the script is
-/// written once and the user is told to paste the options once. The script
-/// resolves which target to chainload from the argv at run time rather than
-/// from anything baked in at write time, so that one paste stays correct across
-/// every later profile switch.
+/// options in `localconfig.vdf`, which no manager writes, so the user is told to
+/// paste the options once. The script resolves which target to chainload from
+/// the argv at run time, so that one paste stays correct across every later
+/// profile switch.
 pub fn run(
   eco: &Ecosystem,
   target: &Target,
@@ -292,10 +187,9 @@ pub fn run(
   // the wrapper's path alone: `needs_wrapper` inside `launch_plan_in` turns on
   // the loader kind, the host, the runtime, and the store, never on the mode, so
   // planning vanilla prints the same bytes a modded plan would. What it avoids is
-  // `resolve_program`, which refuses a modded plan outright when the target ships
-  // none of the loader scripts. Pasting the options is setup a user does before
-  // installing anything, so requiring a loader first would deadlock the two
-  // steps against each other.
+  // the loader check, which refuses a modded plan when the target has no loader.
+  // Pasting the options is setup a user does before installing anything, so
+  // requiring a loader first would deadlock the two steps against each other.
   let mode = if vanilla || print_steam_options {
     LaunchMode::Vanilla
   } else {
@@ -309,94 +203,39 @@ pub fn run(
   let ctx = LaunchContext::new(host, config.store.parse::<StorePlatform>()?, runtime, mode)
     .with_extra_args(combined_args(config, extra_args));
 
-  // Gated on the mode rather than on `vanilla` alone, for the same reason: the
-  // query is answerable without a loader, and every path that actually starts the
-  // game still goes through this.
-  if mode == LaunchMode::Modded {
-    require_loader(target, runtime)?;
+  if print_steam_options {
+    return print_launch_options(eco, target, &ctx);
   }
 
-  // Computed before staging so a plan that fails to resolve (a missing
-  // preloader, a script-injected mode with no script present, and so on) is
-  // reported before anything is written into the game directory.
-  // `launch_plan_in` reads only `target.dir` and staging writes only into
-  // `target.game_dir`, so neither call observes the other and this order is
-  // purely about validating before mutating.
-  let plan = launch_plan_in(&target.dir, eco, GAME, &ctx)?;
+  let prepared = prepare_launch(target, eco, &ctx).map_err(|error| launch_error(target, error))?;
 
-  match &plan.steam_wrapper {
-    // `SteamWrapper`'s fields are informational only: the script names no target
-    // and the launch-options string is derived from its path alone.
-    Some(_) => {
-      let script = launch::wrapper_path(&target.base, GAME);
+  for notice in &prepared.notices {
+    match notice {
+      LaunchNotice::SteamWrapper {
+        script,
+        launch_options,
+      } => {
+        // After the wrapper write and chmod, but staging never runs on the
+        // wrapper path, so a refusal here leaves the game folder untouched.
+        check_steam_can_see(script, &target.dir)?;
 
-      // The script names no target at all: it reads one from
-      // `WRAPPER_TARGET_FLAG` in the argv `launch_plan_in` already built, and a
-      // launch that reaches it without that flag, such as someone starting the
-      // game straight from Steam outside vmm, is deliberately vanilla. So this
-      // is the same bytes for every target, written once per game and rewritten
-      // only to heal a deleted or truncated file. That is what makes a single
-      // shared path safe, and what keeps one paste into Steam's launch options
-      // correct across every later profile switch.
-      write_wrapper_script(&script)?;
-
-      let options = steam_launch_options(&script);
-
-      if print_steam_options {
-        println!("{options}");
-
-        return Ok(());
+        eprintln!("{}", wrapper_reminder(vanilla, launch_options));
       }
-
-      // Deliberately after the `--print-steam-options` return: that flag is a
-      // query for the string a user would paste, and answering it must not depend
-      // on whether a Steam client happens to be running right now, nor on a target
-      // directory that may not exist yet. A silent failure only occurs on an actual
-      // launch, so this guards the launch and nothing else. Placed before the
-      // paste reminder below so a refusal is not preceded by advice.
-      check_steam_can_see(&script, &target.dir)?;
-
-      if vanilla {
-        eprintln!(
-          "vmm: this launch routes through a wrapper script that Steam must invoke.\n\
-           This launch is unmodded, as requested. If the options below are not already\n\
-           pasted into this game's Steam launch options, paste them once. The script\n\
-           resolves its target at run time, so that paste stays correct across every\n\
-           later profile switch:\n\n    {options}\n"
-        );
-      } else {
-        eprintln!(
-          "vmm: this launch routes through a wrapper script that Steam must invoke.\n\
-           Mods load only once the options below are pasted into this game's Steam\n\
-           launch options. That paste is one-time: the script resolves its target at\n\
-           run time, so it stays correct across every later profile switch:\n\n    {options}\n"
-        );
+      LaunchNotice::ProtonDllOverride { launch_options, .. } => {
+        eprintln!("{}", proton_reminder(vanilla, launch_options));
       }
+      LaunchNotice::MadeExecutable { path } => {
+        tracing::info!("marked {} executable", path.display());
+      }
+      _ => {}
     }
-    None if print_steam_options => {
-      return Err(AppError::advice(
-        "there are no Steam launch options to paste on this platform.",
-        "vmm injects into the game directly here rather than through a wrapper \
-         script, so Steam needs nothing configured. Just launch normally.",
-        &["vmm launch"],
-      ));
-    }
-    None => {}
   }
 
-  // A loader package ships its `*_bepinex.sh` scripts without an execute bit, and
-  // both the Steam wrapper and a `ProfileScript` plan `exec` one of them directly.
-  // Under Steam the resulting `Permission denied` is written only to Steam's own
-  // console log, so an un-chmodded profile presents as the game silently never
-  // starting. Done here, after the plan validates and before anything is spawned,
-  // so it covers every target regardless of how it reached disk.
-  for path in ensure_loader_scripts_executable(&target.dir)? {
-    tracing::info!("marked {} executable", path.display());
+  for path in &prepared.staged {
+    tracing::info!("staged {}", path.display());
   }
 
-  stage_if_needed(target, eco, &ctx)?;
-
-  let mut command = plan_command(&plan, &target.game_dir)?;
+  let mut command = prepared.command;
   let program = command.get_program().to_os_string();
 
   let status = command.status().map_err(|error| {
@@ -420,102 +259,86 @@ pub fn run(
   Ok(())
 }
 
+/// Prints the options to paste into the game's Steam launch options: the line
+/// naming the Steam wrapper script, which is written first, or the Proton DLL
+/// override.
+///
+/// Planned directly rather than through [`prepare_launch`]: this is a query, and
+/// preparing a launch would need the game folder to exist, mark loader scripts
+/// executable, and stage a profile's loader files into the game folder.
+///
+/// The wrapper names no target: it reads one from the argv each launch passes,
+/// so its bytes are the same for every target and a rewrite only heals a deleted
+/// or truncated file.
+fn print_launch_options(eco: &Ecosystem, target: &Target, ctx: &LaunchContext) -> AppResult<()> {
+  let plan = launch_plan_in(&target.dir, eco, GAME, ctx)?;
+  let script = launch::wrapper_path(&target.base, GAME);
+
+  let Some(options) = plan.steam_launch_options(&script) else {
+    return Err(AppError::advice(
+      "there are no Steam launch options to paste on this platform.",
+      "vmm injects into the game directly here rather than through a wrapper \
+       script, so Steam needs nothing configured. Just launch normally.",
+      &["vmm launch"],
+    ));
+  };
+
+  if plan.steam_wrapper.is_some() {
+    write_wrapper_script(&script)?;
+  }
+
+  println!("{options}");
+
+  Ok(())
+}
+
+/// The reminder a Steam-wrapper launch prints, so the user pastes
+/// `launch_options` into Steam once.
+fn wrapper_reminder(vanilla: bool, launch_options: &str) -> String {
+  match vanilla {
+    true => format!(
+      "vmm: this launch routes through a wrapper script that Steam must invoke.\n\
+       This launch is unmodded, as requested. If the options below are not already\n\
+       pasted into this game's Steam launch options, paste them once. The script\n\
+       resolves its target at run time, so that paste stays correct across every\n\
+       later profile switch:\n\n    {launch_options}\n"
+    ),
+    false => format!(
+      "vmm: this launch routes through a wrapper script that Steam must invoke.\n\
+       Mods load only once the options below are pasted into this game's Steam\n\
+       launch options. That paste is one-time: the script resolves its target at\n\
+       run time, so it stays correct across every later profile switch:\n\n    {launch_options}\n"
+    ),
+  }
+}
+
+/// The reminder a Steam launch under Proton prints, so the user pastes
+/// `launch_options` into Steam once. Without them Wine loads its builtin DLL
+/// and the game starts unmodded.
+fn proton_reminder(vanilla: bool, launch_options: &str) -> String {
+  match vanilla {
+    true => format!(
+      "vmm: this launch goes through Steam under Proton, which starts the game with\n\
+       its own environment. This launch is unmodded, as requested. If the options\n\
+       below are not already pasted into this game's Steam launch options, paste\n\
+       them once so modded launches work:\n\n    {launch_options}\n"
+    ),
+    false => format!(
+      "vmm: this launch goes through Steam under Proton, which starts the game with\n\
+       its own environment. Mods load only once the options below are pasted into\n\
+       this game's Steam launch options. That paste is one-time:\n\n    {launch_options}\n"
+    ),
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
   use crate::test_support::Fixture;
+  use std::path::PathBuf;
   use tempfile::tempdir;
   use thunderstore_engine::ecosystem::Ecosystem;
   use thunderstore_engine::profile::launch::WRAPPER_TARGET_FLAG;
-
-  #[test]
-  fn steam_exe_in_picks_the_first_root_that_actually_has_steam() {
-    let dir = tempdir().unwrap();
-    let empty = dir.path().join("Program Files (x86)");
-    let real = dir.path().join("Program Files");
-
-    std::fs::create_dir_all(empty.join("Steam")).unwrap();
-    std::fs::create_dir_all(real.join("Steam")).unwrap();
-    std::fs::write(real.join("Steam").join("steam.exe"), b"steam").unwrap();
-
-    assert_eq!(
-      steam_exe_in(&[empty, real.clone()]),
-      Some(real.join("Steam").join("steam.exe"))
-    );
-  }
-
-  #[test]
-  fn steam_exe_in_is_none_when_no_root_holds_steam() {
-    let dir = tempdir().unwrap();
-
-    assert_eq!(steam_exe_in(&[dir.path().to_path_buf()]), None);
-  }
-
-  #[test]
-  fn the_steam_command_passes_applaunch_the_app_id_and_then_the_plan_args() {
-    use std::ffi::OsStr;
-
-    let args = vec!["--doorstop-enabled".to_string(), "true".to_string()];
-    let command = steam_command(Path::new("/steam/steam.exe"), 892970, &args);
-
-    assert_eq!(command.get_program(), OsStr::new("/steam/steam.exe"));
-
-    let passed: Vec<String> = command
-      .get_args()
-      .map(|arg| arg.to_string_lossy().into_owned())
-      .collect();
-
-    // The app id has to precede the loader's own arguments: Steam consumes the
-    // word after `-applaunch` as the id and forwards the rest to the game.
-    assert_eq!(
-      passed,
-      vec!["-applaunch", "892970", "--doorstop-enabled", "true"]
-    );
-  }
-
-  // The override exists only because Windows Steam is not on `PATH`. Off Windows
-  // `steam` is, and the engine's own `to_command` must stay the thing that runs,
-  // so a stray `ProgramFiles` in the environment cannot divert a Linux launch.
-  #[cfg(not(windows))]
-  #[test]
-  fn no_steam_executable_is_resolved_off_windows() {
-    assert_eq!(steam_exe(), None);
-  }
-
-  // The same guarantee one level up, at the function `run` actually spawns
-  // through. `steam_exe` returning `None` is only half of it: what matters is
-  // that `plan_command` then falls through rather than building something of its
-  // own, and a Steam plan is the one shape it is allowed to divert.
-  #[cfg(not(windows))]
-  #[test]
-  fn plan_command_defers_to_the_engine_when_no_steam_executable_is_resolved() {
-    use std::ffi::OsString;
-
-    let target = tempdir().unwrap();
-    let game = tempdir().unwrap();
-
-    bepinex_target(target.path());
-    game_dir_with_exe(game.path());
-
-    let eco = Ecosystem::bundled();
-    let ctx = LaunchContext::new(
-      HostOs::Windows,
-      StorePlatform::Steam,
-      Runtime::Native,
-      LaunchMode::Modded,
-    );
-
-    let plan = launch_plan_in(target.path(), &eco, GAME, &ctx).unwrap();
-    let engine = plan.to_command(game.path()).unwrap();
-    let chosen = plan_command(&plan, game.path()).unwrap();
-
-    assert_eq!(chosen.get_program(), engine.get_program());
-
-    let chosen_args: Vec<OsString> = chosen.get_args().map(|arg| arg.to_owned()).collect();
-    let engine_args: Vec<OsString> = engine.get_args().map(|arg| arg.to_owned()).collect();
-
-    assert_eq!(chosen_args, engine_args);
-  }
 
   #[test]
   fn the_unsupported_os_refusal_does_not_advertise_macos() {
@@ -565,7 +388,10 @@ mod tests {
     let plan = launch_plan_in(target.path(), &eco, GAME, &ctx).unwrap();
     let command = plan.to_command(game.path()).unwrap();
 
-    assert_eq!(command.get_program(), std::ffi::OsStr::new("steam"));
+    assert_eq!(
+      command.get_program(),
+      thunderstore_engine::steam::steam_exe().as_os_str()
+    );
 
     let args: Vec<String> = command
       .get_args()
@@ -674,98 +500,6 @@ mod tests {
     let script = PathBuf::from(&home);
 
     assert!(check_steam_can_see(&script, &script).is_ok());
-  }
-
-  #[test]
-  fn game_dir_mode_never_stages_over_itself() {
-    let base = tempdir().unwrap();
-    let game = tempdir().unwrap();
-
-    bepinex_target(game.path());
-    game_dir_with_exe(game.path());
-
-    // A root-level loader file that staging would copy onto itself.
-    let proxy = game.path().join("winhttp.dll");
-
-    std::fs::write(&proxy, b"proxy-bytes").unwrap();
-
-    let target = Target::resolve(
-      base.path().to_path_buf(),
-      game.path().to_path_buf(),
-      GAME,
-      None,
-    )
-    .unwrap();
-
-    let eco = Ecosystem::bundled();
-    let ctx = LaunchContext::new(
-      HostOs::Linux,
-      StorePlatform::Other,
-      Runtime::Proton,
-      LaunchMode::Modded,
-    );
-
-    stage_if_needed(&target, &eco, &ctx).unwrap();
-
-    // The engine's own same-file check already leaves this untouched even
-    // without vmm's guard; kept as a regression check against that engine
-    // behavior changing, not as proof of the guard below.
-    assert_eq!(std::fs::read(&proxy).unwrap(), b"proxy-bytes");
-
-    // A game-dir-mode target whose directory does not exist still returns an
-    // empty list rather than an error: `needs_staging` is false (dir ==
-    // game_dir, so canonicalization of either falls back to the same
-    // not-yet-existing path), and the guard returns before the engine ever
-    // gets a chance to `read_dir` a path that isn't there. Without the guard
-    // this assertion fails, because `stage_for_launch_in`'s `read_dir` on a
-    // missing directory returns `Err`.
-    let missing = Target::resolve(
-      base.path().to_path_buf(),
-      base.path().join("does-not-exist"),
-      GAME,
-      None,
-    )
-    .unwrap();
-
-    assert_eq!(
-      stage_if_needed(&missing, &eco, &ctx).unwrap(),
-      Vec::<PathBuf>::new()
-    );
-  }
-
-  #[test]
-  fn profile_mode_stages_root_files_into_the_game_dir() {
-    let base = tempdir().unwrap();
-    let game = tempdir().unwrap();
-
-    thunderstore_engine::profile::layout::create(base.path(), GAME, "experiment").unwrap();
-
-    let target = Target::resolve(
-      base.path().to_path_buf(),
-      game.path().to_path_buf(),
-      GAME,
-      Some("experiment"),
-    )
-    .unwrap();
-
-    bepinex_target(&target.dir);
-    std::fs::write(target.dir.join("winhttp.dll"), b"proxy-bytes").unwrap();
-
-    let eco = Ecosystem::bundled();
-    // Proton, so injection is via the proxy DLL rather than a loader script.
-    let ctx = LaunchContext::new(
-      HostOs::Linux,
-      StorePlatform::Other,
-      Runtime::Proton,
-      LaunchMode::Modded,
-    );
-
-    stage_if_needed(&target, &eco, &ctx).unwrap();
-
-    assert_eq!(
-      std::fs::read(game.path().join("winhttp.dll")).unwrap(),
-      b"proxy-bytes"
-    );
   }
 
   /// Writes `run_bepinex.sh` into `dir`'s root, one of the loader scripts that
@@ -908,10 +642,10 @@ mod tests {
     .unwrap();
 
     let eco = Ecosystem::bundled();
-    // Proton, not native, so `steam_wrapper` is `None` even under Steam: script
-    // injection never applies off native Linux.
+    // Proton outside Steam: no wrapper, and no Steam launch options to carry
+    // the DLL override either.
     let config = crate::config::LaunchConfig {
-      store: "steam".to_string(),
+      store: "other".to_string(),
       runtime: "proton".to_string(),
       extra_args: Vec::new(),
     };
@@ -923,6 +657,87 @@ mod tests {
     assert!(error.contains("no Steam launch options"), "got: {error}");
   }
 
+  // `--print-steam-options` plans vanilla so it works before a loader is
+  // installed, so the paste line has to come back for a vanilla plan.
+  #[test]
+  fn a_vanilla_proton_steam_plan_has_the_dll_override_to_paste() {
+    let target = tempdir().unwrap();
+    let eco = Ecosystem::bundled();
+    let ctx = LaunchContext::new(
+      HostOs::Linux,
+      StorePlatform::Steam,
+      Runtime::Proton,
+      LaunchMode::Vanilla,
+    );
+
+    let plan = launch_plan_in(target.path(), &eco, GAME, &ctx).unwrap();
+
+    assert_eq!(
+      plan
+        .steam_launch_options(&target.path().join("steam-wrapper.sh"))
+        .as_deref(),
+      Some("WINEDLLOVERRIDES=\"winhttp=n,b\" %command%")
+    );
+  }
+
+  #[test]
+  fn a_plan_launched_outside_steam_has_no_dll_override_to_paste() {
+    let target = tempdir().unwrap();
+    let eco = Ecosystem::bundled();
+    let ctx = LaunchContext::new(
+      HostOs::Linux,
+      StorePlatform::Other,
+      Runtime::Proton,
+      LaunchMode::Vanilla,
+    );
+
+    let plan = launch_plan_in(target.path(), &eco, GAME, &ctx).unwrap();
+
+    assert_eq!(
+      plan.steam_launch_options(&target.path().join("steam-wrapper.sh")),
+      None
+    );
+  }
+
+  #[test]
+  fn a_missing_loader_is_worded_as_vmm_advice() {
+    let target = Fixture::new().target();
+    let error = Error::NoModLoader {
+      loader: thunderstore_engine::ecosystem::LoaderKind::BepInEx,
+    };
+
+    assert_eq!(
+      launch_error(&target, error).to_string(),
+      no_loader_error(&target).to_string()
+    );
+  }
+
+  #[test]
+  fn the_proton_reminder_carries_the_options_to_paste() {
+    let options = "WINEDLLOVERRIDES=\"winhttp=n,b\" %command%";
+
+    for vanilla in [false, true] {
+      let reminder = proton_reminder(vanilla, options);
+
+      assert!(reminder.contains(options), "got: {reminder}");
+      assert!(reminder.contains("Proton"), "got: {reminder}");
+    }
+  }
+
+  #[test]
+  fn a_vanilla_proton_reminder_does_not_promise_mods() {
+    let options = "WINEDLLOVERRIDES=\"winhttp=n,b\" %command%";
+    let vanilla = proton_reminder(true, options);
+    let modded = proton_reminder(false, options);
+
+    assert!(vanilla.contains("unmodded"), "got: {vanilla}");
+    assert!(!vanilla.contains("Mods load"), "got: {vanilla}");
+    assert!(modded.contains("Mods load"), "got: {modded}");
+  }
+
+  // macOS launches are refused before the loader is checked, so this end-to-end
+  // path never reaches the loader advice there.
+  #[cfg(not(target_os = "macos"))]
   #[test]
   fn launching_a_target_with_no_mod_loader_explains_what_to_do() {
     let fixture = Fixture::new();
@@ -952,24 +767,37 @@ mod tests {
   }
 
   #[test]
-  fn require_loader_accepts_a_target_that_has_the_preloader() {
+  fn launching_into_a_missing_game_dir_names_the_configured_path() {
     let base = tempdir().unwrap();
-    let game = tempdir().unwrap();
+    let missing = base.path().join("does-not-exist");
+    let target = Target::resolve(base.path().to_path_buf(), missing.clone(), GAME, None).unwrap();
 
-    bepinex_target(game.path());
-
-    let target = Target::resolve(
-      base.path().to_path_buf(),
-      game.path().to_path_buf(),
-      GAME,
-      None,
+    let message = run(
+      &Ecosystem::bundled(),
+      &target,
+      &crate::config::LaunchConfig::default(),
+      true,
+      false,
+      &[],
     )
-    .unwrap();
+    .unwrap_err()
+    .to_string();
 
-    // Checked directly rather than through `run`. This gate is what every real
-    // modded launch passes on its way to spawning the game, and a test cannot
-    // follow it that far, so the accepting side would otherwise go unexercised
-    // now that `--print-steam-options` no longer routes through it.
-    assert!(require_loader(&target, Runtime::Native).is_ok());
+    assert!(message.contains("`game_dir`"), "got: {message}");
+    assert!(
+      message.contains(&missing.display().to_string()),
+      "got: {message}"
+    );
+  }
+
+  #[test]
+  fn launch_error_passes_other_engine_errors_through() {
+    let target = Fixture::new().target();
+    let error = Error::Profile("boom".to_string());
+
+    assert_eq!(
+      launch_error(&target, error.clone()).to_string(),
+      error.to_string()
+    );
   }
 }

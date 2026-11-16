@@ -42,10 +42,14 @@ pub fn run(eco: &Ecosystem, target: &Target, mods: &[String], force: bool) -> Ap
     }
   }
 
-  let batch = plan_batch(eco, target, Some(mods))?;
+  let mut batch = plan_batch(eco, target, Some(mods))?;
 
-  if !force && !batch.untracked.is_empty() {
-    return Err(untracked_error(target, &batch));
+  if !batch.untracked.is_empty() {
+    if !force {
+      return Err(untracked_error(target, &batch));
+    }
+
+    batch.confirm_untracked();
   }
 
   let outcome = profile::uninstall_batch(&target.dir, eco, GAME, &batch)?;
@@ -176,7 +180,7 @@ pub fn run_all(
   assume_yes: bool,
   confirm: impl FnOnce(&Target, &UninstallBatch) -> AppResult<bool>,
 ) -> AppResult<()> {
-  let batch = plan_batch(eco, target, None)?;
+  let mut batch = plan_batch(eco, target, None)?;
 
   if batch_len(&batch) == 0 {
     println!(
@@ -217,6 +221,8 @@ pub fn run_all(
 
     return Ok(());
   }
+
+  batch.confirm_untracked();
 
   let outcome = profile::uninstall_batch(&target.dir, eco, GAME, &batch)?;
 

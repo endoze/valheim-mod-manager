@@ -35,6 +35,8 @@ use thunderstore_engine::profile::layout;
 const BASE_URL: &str = "https://thunderstore.io";
 /// The Valheim community slug on Thunderstore.
 const COMMUNITY: &str = "valheim";
+/// The `User-Agent` vmm identifies itself to Thunderstore with.
+const USER_AGENT: &str = concat!("valheim-mod-manager/", env!("CARGO_PKG_VERSION"));
 
 /// Resolves the game directory for installs, or prints actionable guidance and
 /// exits when it cannot proceed.
@@ -200,6 +202,7 @@ async fn run() -> AppResult<()> {
     .base_url(BASE_URL)
     .community(COMMUNITY)
     .cache_dir(&base)
+    .user_agent(USER_AGENT)
     .progress(Arc::new(IndicatifProgress::new()))
     .build()?;
 
