@@ -8,7 +8,6 @@ license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Endoze/valheim-mod-manager"
 documentation = "https://docs.rs/valheim-mod-manager"
-homepage = "https://github.com/Endoze/valheim-mod-manager"
 rust-version = "1.94.0"
 categories = ["game-development", "command-line-utilities"]
 keywords = ["valheim", "mod", "manager", "game", "modding"]
@@ -22,10 +21,10 @@ name = "vmm"
 path = "src/main.rs"
 
 [dependencies]
-thunderstore-engine = "0.4.1"
+thunderstore-engine = "0.5"
 config = "0.15"
 clap = { version = "4.5", features = ["derive"] }
-dirs = "6.0"
+dirs = "7.0"
 indicatif = "0.18"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -39,7 +38,7 @@ tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
 [dev-dependencies]
 base64 = "0.23"
 tempfile = "3.10.1"
-thunderstore-engine = { version = "0.4.1", features = ["test-support"] }
+thunderstore-engine = { version = "0.5", features = ["test-support"] }
 tokio-test = "0.4.3"
 
 # The profile that 'dist' will build with

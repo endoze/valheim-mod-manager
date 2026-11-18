@@ -1,27 +1,73 @@
-name: Tests
+name: CI
 
+# One run per pull request (pull_request event) and one per merge to master
+# (push event). Feature-branch pushes do not trigger a second run.
 on:
+  pull_request:
   push:
+    branches:
+      - master
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build_and_test:
-    name: Valheim Mod Manager Tests and Coverage
+  lint:
+    name: Rustfmt & Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          toolchain: 1.94.0
-      - uses: taiki-e/install-action@v2
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          components: rustfmt, clippy
+      - name: Rustfmt
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Read rust-version
+        id: msrv
+        run: echo "version=$(sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: Check
+        run: cargo check --all-targets --all-features --locked
+
+  test:
+    # Keep this repo's existing job name: branch rulesets may require it.
+    name: Valheim Mod Manager Tests and Coverage
+    # Not the tarpaulin container: it runs as root, which bypasses the
+    # permission-denied failures the toggle tests rely on.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
         with:
           tool: cargo-tarpaulin
       - name: Generate code coverage
-        run: |
-          cargo tarpaulin
-      - name: Coveralls GitHub Action
-        uses: coverallsapp/github-action@v1.1.2
+        run: cargo tarpaulin --engine llvm --all-features
+      - name: Upload coverage to Coveralls
+        uses: coverallsapp/github-action@8d6379e14d29928660c4ba802d8e85393440b329 # v2.3.8
         with:
           github-token: ${{ github.token }}
+          file: coverage/lcov.info
