@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.3](https://github.com/endoze/valheim-mod-manager/compare/v0.4.2...v0.4.3) - 2026-11-18
+
+### Other
+
+- exclude repo tooling from the published crate
+- verify the packaged crate
+
 ## [0.4.2](https://github.com/endoze/valheim-mod-manager/compare/v0.4.1...v0.4.2) - 2026-11-18
 
 ### Other
